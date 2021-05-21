@@ -1,5 +1,5 @@
 # Google Research
-This repository is owned by dedsec-9 and is a fork of the original.
+This is an exact copy and fork of the original Google Research repository.  It is a for reference and dedsec-9 research.
 
 This repository contains code released by
 [Google Research](https://research.google).
