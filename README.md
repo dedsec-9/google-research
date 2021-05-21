@@ -1,5 +1,5 @@
 # Google Research
-This is an exact copy and fork of the original Google Research repository.  It is a for reference and dedsec-9 research.
+This is an exact copy and fork of the original Google Research repository.  It is for reference and dedsec-9 research library.
 
 This repository contains code released by
 [Google Research](https://research.google).
