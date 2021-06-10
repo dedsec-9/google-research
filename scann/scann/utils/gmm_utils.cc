@@ -18,12 +18,10 @@
 #include <cstdint>
 #include <limits>
 
+#include "Eigen/Core"
 #include "Eigen/Dense"
+#include "Eigen/SVD"
 #include "Eigen/StdVector"
-#include "Eigen/src/Core/Matrix.h"
-#include "Eigen/src/Core/util/Constants.h"
-#include "Eigen/src/Core/util/Memory.h"
-#include "Eigen/src/SVD/JacobiSVD.h"
 #include "absl/base/internal/endian.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/random/distributions.h"
@@ -59,18 +57,6 @@ namespace {
 
 void BiasDistances(double bias, MutableSpan<double> distances) {
   if (bias == 0.0) return;
-  for (size_t j : Seq(distances.size())) {
-    distances[j] += bias;
-  }
-}
-
-void OffsetNegativeDistances(MutableSpan<double> distances) {
-  double min_dist = 0.0;
-  for (double d : distances) {
-    min_dist = std::min(min_dist, d);
-  }
-  if (min_dist >= 0.0) return;
-  const double bias = -min_dist;
   for (size_t j : Seq(distances.size())) {
     distances[j] += bias;
   }
