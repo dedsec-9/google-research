@@ -52,15 +52,10 @@ flags.DEFINE_string('output_key', None, 'Teacher model output_key.')
 flags.DEFINE_integer('output_dimension', None, 'Dimension of targets.')
 flags.DEFINE_integer('bd', None, 'Dimension of bottleneck.')
 flags.DEFINE_alias('bottleneck_dimension', 'bd')
-flags.DEFINE_float('al', 1.0, 'Alpha controlling model size.')
-flags.DEFINE_alias('alpha', 'al')
-flags.DEFINE_boolean('average_pool', False, 'Average pool MobileNet output.')
-flags.DEFINE_alias('ap', 'average_pool')
 flags.DEFINE_string(
-    'mobilenet_size', 'small',
-    'Size specification for MobileNet in student model. '
-    'valid entries are `tiny`, `small`, and `large`.')
-flags.DEFINE_alias('ms', 'mobilenet_size')
+    'model_type', 'mobilenet_debug_1.0_False',
+    'Specification for student model. For mobilenet, includes')
+flags.DEFINE_alias('mt', 'model_type')
 
 flags.DEFINE_integer('batch_size', None, 'The number of images in each batch.')
 flags.DEFINE_integer('tbs', None, 'not used')
@@ -93,12 +88,10 @@ def eval_and_report():
 
   writer = tf.summary.create_file_writer(FLAGS.eval_dir)
   model = models.get_keras_model(
+      model_type=FLAGS.model_type,
       bottleneck_dimension=FLAGS.bottleneck_dimension,
       output_dimension=FLAGS.output_dimension,
-      alpha=FLAGS.alpha,
-      mobilenet_size=FLAGS.mobilenet_size,
-      frontend=True,
-      avg_pool=FLAGS.average_pool)
+      frontend=True)
   checkpoint = tf.train.Checkpoint(model=model)
 
   for ckpt in tf.train.checkpoints_iterator(
@@ -126,12 +119,11 @@ def eval_and_report():
         reader=reader,
         samples_key=FLAGS.samples_key,
         min_length=FLAGS.min_length,
-        batch_size=FLAGS.train_batch_size,
+        batch_size=FLAGS.batch_size,
         loop_forever=False,
         shuffle=False,
         teacher_fn=teacher_fn,
-        target_key=target_key,
-        shuffle_buffer_size=FLAGS.shuffle_buffer_size)
+        target_key=target_key)
     logging.info('Got dataset for eval step: %s.', step)
     if FLAGS.take_fixed_data:
       ds = ds.take(FLAGS.take_fixed_data)
@@ -164,12 +156,19 @@ def eval_and_report():
 
 def main(unused_argv):
   assert FLAGS.file_pattern
-  assert FLAGS.teacher_model_hub
   assert FLAGS.output_dimension
-  assert FLAGS.output_key
-  assert FLAGS.bottleneck_dimension
-  assert FLAGS.samples_key
+  assert FLAGS.bottleneck_dimension >= 0
   assert FLAGS.logdir
+  assert FLAGS.samples_key
+
+  if FLAGS.precomputed_targets:
+    assert FLAGS.teacher_model_hub is None
+    assert FLAGS.output_key is None
+    assert FLAGS.target_key
+  else:
+    assert FLAGS.teacher_model_hub
+    assert FLAGS.output_key
+    assert FLAGS.target_key is None
 
   tf.compat.v2.enable_v2_behavior()
   assert tf.executing_eagerly()

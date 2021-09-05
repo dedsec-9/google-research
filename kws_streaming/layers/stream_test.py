@@ -24,8 +24,7 @@ from kws_streaming.layers import test_utils
 from kws_streaming.layers.compat import tf
 from kws_streaming.layers.compat import tf1
 from kws_streaming.models import utils
-from kws_streaming.train import test
-tf1.disable_eager_execution()
+from kws_streaming.train import inference
 
 
 # Toy example which require signal processing in time
@@ -390,11 +389,11 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
 
     if conv_cell == tf.keras.layers.SeparableConv1D:
       kwargs = dict(
-          depthwise_initializer=tf.keras.initializers.GlorotUniform(seed=123),
-          pointwise_initializer=tf.keras.initializers.GlorotUniform(seed=456))
+          depthwise_initializer=FixedRandomInitializer(seed=123),
+          pointwise_initializer=FixedRandomInitializer(seed=456))
     else:
       kwargs = dict(
-          kernel_initializer=tf.keras.initializers.GlorotUniform(seed=123))
+          kernel_initializer=FixedRandomInitializer(seed=123))
 
     # Prepare Keras native model.
     model_native = conv_model_keras_native(params, conv_cell, cnn_filters,
@@ -417,7 +416,7 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
     # run inference
     non_stream_out = model.predict(inp_audio)
     native_out = model_native.predict(inp_audio)
-    stream_out = test.run_stream_inference(params, model_stream, inp_audio)
+    stream_out = inference.run_stream_inference(params, model_stream, inp_audio)
 
     # normalize output data and compare them
     channel = 0
@@ -439,5 +438,25 @@ class StreamTest(tf.test.TestCase, parameterized.TestCase):
       self.assertAllClose(non_stream_out, native_out)
 
 
+@tf.keras.utils.register_keras_serializable()
+class FixedRandomInitializer(tf.keras.initializers.Initializer):
+
+  def __init__(self, seed, mean=0., stddev=1.):
+    self.mean = mean
+    self.stddev = stddev
+    self.seed = seed
+
+  def __call__(self, shape, dtype=None):
+    return tf.random.stateless_normal(
+        shape, mean=self.mean, stddev=self.stddev, dtype=dtype,
+        seed=[self.seed, 0])
+
+  def get_config(self):
+    return {'seed': self.seed,
+            'mean': self.mean,
+            'stddev': self.stddev}
+
+
 if __name__ == '__main__':
+  tf1.disable_eager_execution()
   tf.test.main()

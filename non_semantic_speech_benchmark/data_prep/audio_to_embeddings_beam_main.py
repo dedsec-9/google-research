@@ -24,6 +24,8 @@ This file has two modes:
 """
 # pylint:enable=line-too-long
 
+from typing import Any, Dict, List
+
 from absl import app
 from absl import flags
 from absl import logging
@@ -57,6 +59,12 @@ flags.DEFINE_list(
     'module_output_keys', None,
     'List of module output key. Must be the same length as '
     '`embedding_modules`.')
+flags.DEFINE_string(
+    'comma_escape_char', '?',
+    'Sometimes we want commas to appear in `embedding_modules`, '
+    '`embedding_names`, or `module_output_key`. However, commas get split out '
+    'in Googles Python `DEFINE_list`. We compromise by introducing a special '
+    'character, which we replace with commas.')
 flags.DEFINE_string('audio_key', None, 'Key of audio.')
 flags.DEFINE_string(
     'sample_rate_key', None, 'Key of sample rate. '
@@ -83,15 +91,29 @@ flags.DEFINE_bool(
 flags.DEFINE_bool(
     'split_embeddings_into_separate_tables', False,
     'If true, write each embedding to a separate table.')
+# Do not use `use_frontend_fn` and `model_input_min_length > 0`.
 flags.DEFINE_bool(
     'use_frontend_fn', False,
-    'If `true`, call frontend fn on audio before passing to the model.')
+    'If `true`, call frontend fn on audio before passing to the model. Do not '
+    'use if `model_input_min_length` is not `None`.')
+flags.DEFINE_bool(
+    'normalize_to_pm_one', True,
+    'Whether to normalize input to +- 1 before passing to model.')
+flags.DEFINE_integer(
+    'model_input_min_length', None, 'Min length to the model. 0-pad inputs to '
+    'this length, if necessary. Note that frontends usually contain their own '
+    'length logic, unless the model is in TFLite format. Do not use if '
+    '`use_frontend_fn` is `True`.')
 flags.DEFINE_bool('debug', False, 'If True, run in debug model.')
 
 FLAGS = flags.FLAGS
 
 
-def main(unused_argv):
+def _maybe_add_commas(list_obj):
+  return [x.replace(FLAGS.comma_escape_char, ',') for x in list_obj]
+
+
+def main(_):
 
   # Get input data location from flags. If we're reading a TFDS dataset, get
   # train, validation, and test.
@@ -99,12 +121,20 @@ def main(unused_argv):
       FLAGS.input_glob, FLAGS.sample_rate, FLAGS.tfds_dataset,
       FLAGS.output_filename, FLAGS.tfds_data_dir)
 
+  # Sometimes we want commas to appear in `embedding_modules`,
+  # `embedding_names`, or `module_output_key`. However, commas get split out in
+  # Google's Python `DEFINE_list`. We compromise by introducing a special
+  # character, which we replace with commas here.
+  embedding_modules = _maybe_add_commas(FLAGS.embedding_modules)
+  embedding_names = _maybe_add_commas(FLAGS.embedding_names)
+  module_output_keys = _maybe_add_commas(FLAGS.module_output_keys)
+
   # Check that inputs and flags are formatted correctly.
   audio_to_embeddings_beam_utils.validate_inputs(input_filenames_list,
                                                  output_filenames,
-                                                 FLAGS.embedding_modules,
-                                                 FLAGS.embedding_names,
-                                                 FLAGS.module_output_keys)
+                                                 embedding_modules,
+                                                 embedding_names,
+                                                 module_output_keys)
 
   input_format = 'tfrecord'
   output_format = 'tfrecord'
@@ -121,9 +151,9 @@ def main(unused_argv):
           input_filenames_or_glob,
           sample_rate,
           FLAGS.debug,
-          FLAGS.embedding_names,
-          FLAGS.embedding_modules,
-          FLAGS.module_output_keys,
+          embedding_names,
+          embedding_modules,
+          module_output_keys,
           FLAGS.audio_key,
           FLAGS.sample_rate_key,
           FLAGS.label_key,
@@ -131,17 +161,28 @@ def main(unused_argv):
           FLAGS.average_over_time,
           FLAGS.delete_audio_from_output,
           output_filename,
-          split_embeddings_into_separate_tables=FLAGS.split_embeddings_into_separate_tables,  # pylint:disable=line-too-long
+          split_embeddings_into_separate_tables=FLAGS
+          .split_embeddings_into_separate_tables,  # pylint:disable=line-too-long
           use_frontend_fn=FLAGS.use_frontend_fn,
+          normalize_to_pm_one=FLAGS.normalize_to_pm_one,
+          model_input_min_length=FLAGS.model_input_min_length,
           input_format=input_format,
           output_format=output_format,
-          suffix=i)
+          suffix=str(i))
 
+
+@flags.multi_flags_validator(
+    ['use_frontend_fn', 'model_input_min_length'],
+    message='Use only one of `use_frontend_fn` and `model_input_min_length`.'
+)
+def no_min_input_length_with_frontend_fn(flags_dict):
+  return (not flags_dict['use_frontend_fn'] or
+          not flags_dict['model_input_min_length'])
 
 if __name__ == '__main__':
   flags.mark_flags_as_required([
       'output_filename', 'embedding_names', 'embedding_modules',
-      'module_output_keys', 'audio_key', 'label_key',
+      'module_output_keys', 'audio_key',
   ])
   flags.mark_flags_as_mutual_exclusive(['input_glob', 'tfds_dataset'],
                                        required=True)

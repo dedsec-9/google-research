@@ -14,9 +14,9 @@
 # limitations under the License.
 
 """Specfies the behaviour of a single state."""
+import dataclasses as dc
 import functools as ft
 from typing import Any, Callable, List, Optional, Text, Tuple, Union
-import dataclasses as dc
 
 import jax.numpy as jp
 import numpy as np
@@ -26,10 +26,6 @@ import typing_extensions
 from blur import blur_env
 from blur import genome_util
 from blur import synapse_util
-
-
-jp_env = blur_env.jp_env
-tf_env = blur_env.tf_env
 
 
 @dc.dataclass
@@ -114,14 +110,12 @@ class FeedbackFn(Protocol):
   def __call__(self,
                final_layer,
                ground_truth,
-               env = None):
+               env = blur_env.tf_env):
     """Computes a feedback function from the last layer and the ground truth."""
 
 
 def concat_groundtruth_in(final_layer, ground_truth,
-                          env = None):
-  if env is None:
-    env = blur_env.tf_env
+                          env = blur_env.tf_env):
   return env.concat(
       [final_layer[Ellipsis, 0:1], ground_truth[Ellipsis, None],
        env.zeros_like(final_layer[Ellipsis, 2:])], axis=-1)
@@ -151,7 +145,7 @@ class NetworkSpec:
   forward_synapse_update: bool = False
   supervised_every: Optional[int] = None
   synapse_transform_fn: Optional[SynapseTransformFn] = None
-
+  fixed_batches: bool = False
   # Synapse saturation mechanism and parameters
   synapse_saturation_eps: Optional[float] = None
   synapse_saturation_type: Optional[str] = None
@@ -197,6 +191,14 @@ def default_network_spec(env):
                      last_layer_activation_fn=env.tanh)
 
 
+def backprop_network_spec(env):
+  del env  # Unused.
+  return NetworkSpec(
+      backward_update='multiplicative_second_state',
+      symmetric_in_out_synapses=True,
+      symmetric_states_synapses=True)
+
+
 def network_step(state,
                  genome,
                  input_fn,
@@ -206,7 +208,7 @@ def network_step(state,
                  network_spec = None,
                  debug_hidden_states = None,
                  step = None,
-                 env):
+                 env = blur_env.tf_env):
   """Given the current state of the network produces new state."""
   if network_spec is None:
     network_spec = default_network_spec(env)
@@ -563,13 +565,13 @@ def compute_neuron_state(old_neuron_state, synaptic_update,
     # TODO(sandler): Add inverse activation of old_state if needed.
   if synaptic_update is None:
     return old_neuron_state
-  num_states = old_neuron_state.shape[-1]
   if update_type == 'multiplicative_second_state':
-    assert num_states == 2
-    new_neuron_state = env.stack([
-        old_neuron_state[Ellipsis, 0],
-        old_neuron_state[Ellipsis, 1] * synaptic_update[Ellipsis, 1]
-    ], axis=-1) * env.right_pad_shape(g.keep, to=old_neuron_state)
+    # TODO(mxv): possibly rename this update_type, since technically it should
+    # be called skip_first_state or something like this.
+    second_state_update = old_neuron_state[Ellipsis, 1:] * synaptic_update[Ellipsis, 1:]
+    new_neuron_state = env.concat(
+        [old_neuron_state[Ellipsis, 0:1], second_state_update], axis=-1
+        ) * env.right_pad_shape(g.keep, to=old_neuron_state)
   elif update_type == 'multiplicative':
     new_neuron_state = (
         old_neuron_state * synaptic_update *

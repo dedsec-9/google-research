@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Lint as: python3
-"""Trains on embeddings using Keras."""
+"""Trains on embeddings using Keras.
+"""
 
 from absl import app
 from absl import flags
@@ -55,16 +56,11 @@ flags.DEFINE_alias('ml', 'min_length')
 flags.DEFINE_integer(
     'bottleneck_dimension', None, 'Dimension of bottleneck. '
     'If 0, bottleneck layer is excluded.')
-flags.DEFINE_float('alpha', 1.0, 'Alpha controlling MobileNet width.')
-flags.DEFINE_boolean('average_pool', False, 'Average pool MobileNet output.')
-flags.DEFINE_string(
-    'mobilenet_size', 'small',
-    'Size specification for MobileNet in student model. '
-    'valid entries are `tiny`, `small`, and `large`.')
 flags.DEFINE_alias('bd', 'bottleneck_dimension')
-flags.DEFINE_alias('al', 'alpha')
-flags.DEFINE_alias('ap', 'average_pool')
-flags.DEFINE_alias('ms', 'mobilenet_size')
+flags.DEFINE_string(
+    'model_type', 'mobilenet_debug_1.0_False',
+    'Specification for student model.')
+flags.DEFINE_alias('mt', 'model_type')
 
 # Training config flags.
 flags.DEFINE_integer('train_batch_size', 1, 'Hyperparameter: batch size.')
@@ -120,6 +116,7 @@ def train_and_report(debug=False):
   if FLAGS.precomputed_targets:
     teacher_fn = None
     assert target_key is not None
+    assert FLAGS.output_key is None
   else:
     teacher_fn = get_data.savedmodel_to_func(
         hub.load(FLAGS.teacher_model_hub), FLAGS.output_key)
@@ -163,12 +160,10 @@ def train_and_report(debug=False):
     compressor = compression_wrapper.get_apply_compression(
         compression_params, global_step=global_step)
   model = models.get_keras_model(
+      model_type=FLAGS.model_type,
       bottleneck_dimension=FLAGS.bottleneck_dimension,
       output_dimension=output_dimension,
-      alpha=FLAGS.alpha,
-      mobilenet_size=FLAGS.mobilenet_size,
       frontend=True,
-      avg_pool=FLAGS.average_pool,
       compressor=compressor,
       quantize_aware_training=FLAGS.quantize_aware_training)
   model.summary()
@@ -235,16 +230,15 @@ def main(unused_argv):
   assert FLAGS.bottleneck_dimension >= 0
   assert FLAGS.shuffle_buffer_size
   assert FLAGS.logdir
+  assert FLAGS.samples_key
 
   if FLAGS.precomputed_targets:
     assert FLAGS.teacher_model_hub is None
     assert FLAGS.output_key is None
-    assert FLAGS.samples_key is None
     assert FLAGS.target_key
   else:
     assert FLAGS.teacher_model_hub
     assert FLAGS.output_key
-    assert FLAGS.samples_key
     assert FLAGS.target_key is None
 
   # Incompatible tools.
