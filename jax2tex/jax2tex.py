@@ -43,13 +43,15 @@ from jax import tree_util
 from jax import util
 
 from jax.abstract_arrays import ShapedArray
-from jax.api import make_jaxpr
+from jax import make_jaxpr
 from jax.core import Primitive
 from jax.interpreters import ad
 from jax.interpreters import batching
 from jax.interpreters import xla
 
 import jax.numpy as np
+
+import numpy as onp
 
 # pylint: disable=redefined-builtin
 map = util.safe_map
@@ -129,6 +131,8 @@ def jax2tex(fn: Callable[..., Array], *args) -> str:
     if isinstance(v, core.Literal):
       if isinstance(v.val, float) or isinstance(v.val, int):
         return ShapedArray((), type(v.val))
+      elif v.val is core.unit:
+        return core.AbstractUnit()
       return ShapedArray(v.val.shape, v.val.dtype)
     else:
       return abstract[v]
@@ -245,7 +249,7 @@ def jax2tex(fn: Callable[..., Array], *args) -> str:
   used_exprs = tuple(read_expr(v) for v in used_vars)
 
   # Go through the latex outputs and construct a string representation if they
-  # have a data dependency on the output and are not supressed aliases.
+  # have a data dependency on the output and are not suppressed aliases.
   output = ''
   for out_var, in_var, alias in output_lines:
 
@@ -259,6 +263,7 @@ def jax2tex(fn: Callable[..., Array], *args) -> str:
       continue
 
     shaped = read_shaped(out_var)
+    assert not isinstance(shaped, core.AbstractUnit), shaped
     indices = ''.join([chr(i + ord('i')) for i, s in enumerate(shaped.shape) if
                        s > 1])
 
@@ -417,7 +422,7 @@ class BoundVariable(object):
 
     if isinstance(self.val, float) or isinstance(self.val, int):
       return str(self.var) + suffix
-    elif (isinstance(self.val, np.ndarray) or
+    elif (isinstance(self.val, (onp.ndarray, np.ndarray)) or
           isinstance(self.val, ShapedArray)):
       if not self.val.shape:
         return str(self.var) + suffix
@@ -476,9 +481,7 @@ BoundASTNode = Union[BoundVariable, BoundTExpr]
 
 
 def is_array_or_float(x: Array) -> bool:
-  return (isinstance(x, np.ndarray) or
-          isinstance(x, float) or
-          isinstance(x, int))
+  return isinstance(x, (onp.ndarray, np.ndarray, float, int))
 
 
 def canonicalize_consts(literals: List[Array]) -> MaybeEmptyTuple[Variable]:

@@ -26,6 +26,7 @@ import tensorflow as tf
 from muzero import actor
 from muzero import core as mzcore
 from muzero import learner
+from muzero import learner_flags
 from muzero.tictactoe import env
 from muzero.tictactoe import network
 
@@ -59,7 +60,6 @@ flags.DEFINE_float('root_exploration_fraction', .25,
 flags.DEFINE_integer('pb_c_base', 19652, 'PB C Base.')
 flags.DEFINE_float('pb_c_init', 2.5, 'PB C Init.')
 
-flags.DEFINE_integer('log_frequency', 100, 'in number of training steps')
 flags.DEFINE_float('temperature', .1, 'for softmax sampling of actions')
 
 flags.DEFINE_integer('value_encoder_steps', 8, 'If 0, take 1 step per integer')
@@ -149,10 +149,11 @@ def main(argv):
       dirichlet_alpha=FLAGS.dirichlet_alpha,
       root_exploration_fraction=FLAGS.root_exploration_fraction,
       num_simulations=FLAGS.num_simulations,
-      initial_inference_batch_size=learner.INITIAL_INFERENCE_BATCH_SIZE.value,
-      recurrent_inference_batch_size=learner.RECURRENT_INFERENCE_BATCH_SIZE
-      .value,
-      train_batch_size=learner.BATCH_SIZE.value,
+      initial_inference_batch_size=(
+          learner_flags.INITIAL_INFERENCE_BATCH_SIZE.value),
+      recurrent_inference_batch_size=(
+          learner_flags.RECURRENT_INFERENCE_BATCH_SIZE.value),
+      train_batch_size=learner_flags.BATCH_SIZE.value,
       td_steps=FLAGS.td_steps,
       num_unroll_steps=FLAGS.num_unroll_steps,
       pb_c_base=FLAGS.pb_c_base,
@@ -167,7 +168,7 @@ def main(argv):
     actor.actor_loop(env.create_environment, mzconfig)
   elif FLAGS.run_mode == 'learner':
     learner.learner_loop(env_descriptor, create_agent, create_optimizer,
-                         mzconfig)
+                         learner_flags.learner_config_from_flags(), mzconfig)
   else:
     raise ValueError('Unsupported run mode {}'.format(FLAGS.run_mode))
 
