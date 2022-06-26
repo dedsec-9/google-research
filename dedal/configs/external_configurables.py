@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,17 +16,10 @@
 """Things to be gin configurables."""
 
 import gin
-import sonnet.v2 as snt
 import tensorflow  as tf
 
 
 configurables = {
-    'snt.optimizers': [
-        snt.optimizers.Adam,
-        snt.optimizers.Momentum,
-        snt.optimizers.SGD,
-        snt.optimizers.RMSProp,
-    ],
     'tf.keras.activations': [
         tf.keras.activations.elu,
         tf.keras.activations.exponential,

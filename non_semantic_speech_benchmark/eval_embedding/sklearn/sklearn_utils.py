@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Utilities for evaluating on sklearn models."""
 
 from typing import Any, List, Optional, Tuple
@@ -68,13 +67,20 @@ def tfexamples_to_nps(
     # Read labels.
     if label_name not in feats:
       raise ValueError(
-          f'`label_name` not in feats: {label_name} vs {feats.keys()}')
-    cur_lbl = feats[label_name].bytes_list.value[0]
-    assert isinstance(cur_lbl, bytes)
-    if cur_lbl.decode('utf-8') not in label_list:
-      raise ValueError(
-          f'Current label not found in label list: {cur_lbl} vs {label_list}')
-    labels.append(label_list.index(cur_lbl.decode('utf-8')))
+          f'`label_name` not in feats: {label_name} vs {list(feats.keys())}')
+    if feats[label_name].bytes_list.value:
+      cur_lbl = feats[label_name].bytes_list.value[0]
+      assert isinstance(cur_lbl, bytes)
+      if cur_lbl.decode('utf-8') not in label_list:
+        raise ValueError(
+            f'Current label not found in label list: {cur_lbl} vs {label_list}')
+      label = cur_lbl.decode('utf-8')
+    elif feats[label_name].int64_list.value:
+      cur_lbl = feats[label_name].int64_list.value[0]
+      label = str(cur_lbl)
+    else:
+      raise ValueError('Invalid type for cur_lbl.')
+    labels.append(label_list.index(label))
 
     # Read speaker ID, if necessary.
     if speaker_name:

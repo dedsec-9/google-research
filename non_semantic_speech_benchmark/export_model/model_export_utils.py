@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,8 +28,6 @@ import tensorflow as tf
 from non_semantic_speech_benchmark.data_prep import data_prep_utils
 from non_semantic_speech_benchmark.distillation import frontend_lib
 from non_semantic_speech_benchmark.distillation import models
-from non_semantic_speech_benchmark.distillation.compression_lib import compression_op as compression
-from non_semantic_speech_benchmark.distillation.compression_lib import compression_wrapper
 
 
 def get_experiment_dirs(experiment_dir):
@@ -76,13 +74,6 @@ def get_params(experiment_dir_str):
   return parsed_params
 
 
-def get_default_compressor():
-  compression_params = compression.CompressionOp.get_default_hparams().parse('')
-  compressor = compression_wrapper.get_apply_compression(
-      compression_params, global_step=0)
-  return compressor
-
-
 def get_model(checkpoint_folder_path,
               params,
               tflite_friendly,
@@ -91,8 +82,9 @@ def get_model(checkpoint_folder_path,
   """Given folder & training params, exports SavedModel without frontend."""
   # Optionally override frontend flags from
   # `non_semantic_speech_benchmark/export_model/tf_frontend.py`
-  override_flag_names = ['frame_hop', 'n_required', 'num_mel_bins',
-                         'frame_width']
+  override_flag_names = [
+      'frame_hop', 'n_required', 'num_mel_bins', 'frame_width', 'pad_mode'
+  ]
   for flag_name in override_flag_names:
     if flag_name in params:
       setattr(flags.FLAGS, flag_name, params[flag_name])

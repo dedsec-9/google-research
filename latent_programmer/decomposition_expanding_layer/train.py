@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# python3
 """Train seq-to-seq model on random supervised training tasks."""
 
 # pylint: disable=g-bare-generic
@@ -109,8 +108,6 @@ flags.DEFINE_float('alpha_encoding', 1,
 
 flags.DEFINE_bool('use_relative_attention', True,
                   'Whether to use relative positonal embeddings.')
-flags.DEFINE_integer('num_relative_position_buckets', 32,
-                     'Number of buckets when computing relative positions.')
 
 
 def create_learning_rate_scheduler(
@@ -920,7 +917,6 @@ def main(_):
       mlp_dim=FLAGS.hidden_dim,
       max_len=max(FLAGS.max_characters, FLAGS.max_program_length),
       use_relative_attention=FLAGS.use_relative_attention,
-      num_relative_position_buckets=FLAGS.num_relative_position_buckets,
       deterministic=False,
       decode=False,
       bos_token=bos_token)

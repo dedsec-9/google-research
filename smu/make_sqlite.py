@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ from absl import logging
 
 import tensorflow as tf
 from tensorflow.io import gfile
-from smu import dataset_pb2
 from smu import smu_sqlite
 
 flags.DEFINE_string('input_tfrecord', None, 'Glob of tfrecord files to read')
@@ -34,12 +33,13 @@ def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
+  logging.get_absl_handler().use_absl_log_file()
+
   logging.info('Opening %s', FLAGS.output_sqlite)
   db = smu_sqlite.SMUSQLite(FLAGS.output_sqlite, 'c')
 
   dataset = tf.data.TFRecordDataset(gfile.glob(FLAGS.input_tfrecord))
-  db.bulk_insert(
-      dataset_pb2.Conformer.FromString(raw.numpy()) for raw in dataset)
+  db.bulk_insert((raw.numpy() for raw in dataset), batch_size=10000)
 
 
 if __name__ == '__main__':

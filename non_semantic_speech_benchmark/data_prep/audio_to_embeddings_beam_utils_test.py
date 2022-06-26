@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Tests for NOSS data prep."""
 
 import os
@@ -108,6 +107,7 @@ class AudioToEmbeddingsTests(parameterized.TestCase):
           speaker_id_key='speaker_id',
           average_over_time=True,
           delete_audio_from_output=False,
+          pass_through_normalized_audio=True,
           chunk_len=0,
           embedding_length=10,
           input_format='tfrecord',
@@ -149,6 +149,7 @@ class AudioToEmbeddingsTests(parameterized.TestCase):
       {'data_prep_behavior': 'many_models'},
       {'data_prep_behavior': 'many_embeddings_single_model'},
       {'data_prep_behavior': 'chunked_audio'},
+      {'data_prep_behavior': 'batched_single_model'},
   )
   @flagsaver.flagsaver
   def test_read_flags_and_create_pipeline(self, data_prep_behavior):
@@ -158,12 +159,19 @@ class AudioToEmbeddingsTests(parameterized.TestCase):
     FLAGS.output_filename = os.path.join(absltest.get_default_test_tmpdir(),
                                          f'{data_prep_behavior}.tfrecord')
     FLAGS.data_prep_behavior = data_prep_behavior
-    FLAGS.embedding_names = ['em1', 'em2']
+
     FLAGS.embedding_modules = ['dummy_mod_loc']
-    FLAGS.module_output_keys = ['k1', 'k2']
+
+    if data_prep_behavior == 'batched_single_model':
+      FLAGS.embedding_names = ['em1']
+      FLAGS.module_output_keys = ['k1']
+    else:
+      FLAGS.embedding_names = ['em1', 'em2']
+      FLAGS.module_output_keys = ['k1', 'k2']
     FLAGS.sample_rate = 5
     FLAGS.audio_key = 'audio_key'
     FLAGS.label_key = 'label_key'
+    FLAGS.batch_size = 2
     input_filenames_list, output_filenames, beam_params = audio_to_embeddings_beam_utils.get_beam_params_from_flags(
     )
     # Use the defaults, unless we are using TFLite models.

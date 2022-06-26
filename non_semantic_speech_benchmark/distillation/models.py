@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Models for distillation.
 
 """
@@ -23,6 +22,7 @@ from typing import Tuple
 from absl import logging
 import tensorflow as tf
 import tensorflow_hub as hub
+from non_semantic_speech_benchmark.data_prep import augmentation
 from non_semantic_speech_benchmark.distillation import frontend_lib
 
 
@@ -50,7 +50,8 @@ def get_keras_model(model_type,
                     output_dimension,
                     truncate_output = False,
                     frontend = True,
-                    tflite = False):
+                    tflite = False,
+                    spec_augment = False):
   """Make a Keras student model."""
   # For debugging, log hyperparameter values.
   logging.info('model name: %s', model_type)
@@ -58,18 +59,20 @@ def get_keras_model(model_type,
   logging.info('output_dimension: %i', output_dimension)
   logging.info('frontend: %s', frontend)
   logging.info('tflite: %s', tflite)
+  logging.info('spec_augment: %s', spec_augment)
 
   output_dict = {}  # Dictionary of model outputs.
 
   # Construct model input and frontend.
-  model_in, feats = _frontend_keras(frontend, tflite)
+  model_in, feats = frontend_keras(frontend, tflite)
   feats.shape.assert_is_compatible_with([None, None, None, 1])
-  inputs = [model_in]
-  logging.info('Features shape: %s', feats.shape)
+  spec_augment_fn = augmentation.SpecAugment() if spec_augment else tf.identity
+  feats = spec_augment_fn(feats)
 
   # Build network.
-  model_out = _build_main_net(model_type, feats)
-  embeddings = tf.keras.layers.Flatten(name='distilled_output')(model_out)
+  logging.info('Features shape: %s', feats.shape)
+  model_out = build_main_net(model_type, feats)
+  logging.info('Model output shape: %s', model_out.shape)
 
   # The last fully-connected layer can sometimes be the single largest
   # layer in the entire network. It's also not always very valuable. We try
@@ -77,16 +80,18 @@ def get_keras_model(model_type,
   # 1) A FC layer
   # 2) Taking the first `output_dimension` elements.
   need_final_layer = (output_dimension and
-                      embeddings.shape[1] != output_dimension)
+                      model_out.shape[1] != output_dimension)
 
   # If we need to truncate, do it before we save the embedding. Otherwise,
   # the embedding will contain some garbage dimensions.
   if need_final_layer and truncate_output:
-    if embeddings.shape[1] < output_dimension:
+    if model_out.shape[1] < output_dimension:
       embeddings = tf.pad(
-          embeddings, [[0, 0], [0, output_dimension - embeddings.shape[1]]])
+          model_out, [[0, 0], [0, output_dimension - model_out.shape[1]]])
     else:
-      embeddings = embeddings[:, :output_dimension]
+      embeddings = model_out[:, :output_dimension]
+  else:
+    embeddings = model_out
 
   # Construct optional final layer, and create output dictionary.
   output_dict['embedding'] = embeddings
@@ -96,14 +101,12 @@ def get_keras_model(model_type,
     target = tf.keras.layers.Dense(
         output_dimension, name='embedding_to_target')(target)
   output_dict['embedding_to_target'] = target
-  output_model = tf.keras.Model(inputs=inputs, outputs=output_dict)
+  output_model = tf.keras.Model(inputs=[model_in], outputs=output_dict)
 
   return output_model
 
 
-def _frontend_keras(
-    frontend,
-    tflite):
+def frontend_keras(frontend, tflite):
   """Returns model input and features."""
   # TFLite use-cases usually use non-batched inference, and this also enables
   # hardware acceleration.
@@ -115,14 +118,13 @@ def _frontend_keras(
     model_in = tf.keras.Input((None,),
                               name='audio_samples',
                               batch_size=num_batches)
-    frontend_fn = frontend_lib.get_feats_map_fn(tflite, frontend_args)
-    feats = tf.keras.layers.Lambda(frontend_fn)(model_in)
+    bs = tf.shape(model_in)[0]
+    feats = frontend_lib.SamplesToFeats(tflite, frontend_args)(model_in)
     feats.shape.assert_is_compatible_with(
         [num_batches, feats_inner_dim, frontend_args['frame_width'],
          frontend_args['num_mel_bins']])
     feats = tf.reshape(
-        feats, [-1, feats_inner_dim * frontend_args['frame_width'],
-                frontend_args['num_mel_bins'], 1])
+        feats, [bs, -1, frontend_args['num_mel_bins'], 1])
   else:
     model_in = tf.keras.Input(
         (feats_inner_dim * frontend_args['frame_width'],
@@ -140,10 +142,10 @@ def _frontend_keras(
   return (model_in, feats)
 
 
-def _build_main_net(
+def build_main_net(
     model_type,
     feats,
-    ):
+):
   """Constructs main network."""
   if model_type.startswith('mobilenet_'):
     # Format is "mobilenet_{size}_{alpha}_{avg_pool}"

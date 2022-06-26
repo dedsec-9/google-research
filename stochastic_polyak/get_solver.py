@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -55,7 +55,7 @@ def get_solver(flags, config, loss_fun, losses):
   # Initialize solver and parameters.
   if config.solver == "SGD":
     opt = optax.sgd(config.learning_rate, momentum)
-    solver = jaxopt.OptaxSolver(opt=opt, fun=loss_fun, has_aux=True)
+    solver = jaxopt.OptaxSolver(opt=opt, fun=loss_fun, has_aux=True)  # pytype: disable=wrong-arg-types
   elif config.solver == "SPS":
     solver = jaxopt.PolyakSGD(
         fun=loss_fun,

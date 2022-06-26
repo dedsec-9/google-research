@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ from absl.testing import absltest
 from absl.testing import flagsaver
 from absl.testing import parameterized
 
+import numpy as np
 import tensorflow as tf
 
 from non_semantic_speech_benchmark.distillation import models
@@ -47,6 +48,32 @@ class ModelsTest(parameterized.TestCase):
     m = models.get_keras_model(
         'mobilenet_debug_1.0_False', output_dimension,
         frontend=frontend, tflite=tflite)
+    o_dict = m(input_tensor)
+    emb, o = o_dict['embedding'], o_dict['embedding_to_target']
+
+    emb.shape.assert_has_rank(2)
+    o.shape.assert_has_rank(2)
+    self.assertEqual(o.shape[1], 5)
+
+  @parameterized.parameters(
+      {'frontend': True, 'tflite': True, 'spec_augment': False},
+      {'frontend': True, 'tflite': True, 'spec_augment': True},
+      {'frontend': False, 'tflite': True, 'spec_augment': True},
+      {'frontend': True, 'tflite': False, 'spec_augment': True},
+      {'frontend': False, 'tflite': False, 'spec_augment': True},
+  )
+  def test_model_spec_augment(self, frontend, tflite, spec_augment):
+    if frontend:
+      input_tensor_shape = [1 if tflite else 2, 32000]  # audio signal.
+    else:
+      input_tensor_shape = [3, 96, 64, 1]  # log Mel spectrogram.
+    input_tensor = tf.zeros(input_tensor_shape, dtype=tf.float32)
+    output_dimension = 5
+
+    m = models.get_keras_model(
+        'mobilenet_debug_1.0_False', output_dimension,
+        frontend=frontend, tflite=tflite,
+        spec_augment=spec_augment)
     o_dict = m(input_tensor)
     emb, o = o_dict['embedding'], o_dict['embedding_to_target']
 
@@ -128,6 +155,54 @@ class ModelsTest(parameterized.TestCase):
     o.shape.assert_has_rank(2)
     self.assertEqual(o.shape[0], 2)
     self.assertEqual(o.shape[1], 5)
+
+  @parameterized.parameters(
+      {'model_type': 'efficientnetv2b0'},
+  )
+  @flagsaver.flagsaver
+  def test_get_keras_model_frontend_input_shapes(self, model_type):
+    flags.FLAGS.frame_hop = 5
+    flags.FLAGS.num_mel_bins = 80
+    flags.FLAGS.frame_width = 5
+    flags.FLAGS.n_required = 32000
+    m = models.get_keras_model(
+        model_type=model_type,
+        output_dimension=0,
+        frontend=True,
+        tflite=False,
+        spec_augment=False)
+    samples = tf.zeros([2, 40000], tf.float32)
+    m(samples)
+
+  @flagsaver.flagsaver
+  def test_get_keras_model_frontend_pad_mode(self):
+    """Check that pad mode is properly piped through."""
+    # Flags for both models.
+    flags.FLAGS.frame_hop = 5
+    flags.FLAGS.num_mel_bins = 80
+    flags.FLAGS.frame_width = 5
+    flags.FLAGS.n_required = 32000
+
+    model_input = np.random.random([2, 10000])
+
+    def _model():
+      return models.get_keras_model(
+          model_type='efficientnetv2b0',
+          output_dimension=0,
+          frontend=True,
+          tflite=False,
+          spec_augment=False)
+    flags.FLAGS.pad_mode = 'CONSTANT'
+    m_constant = _model()
+    flags.FLAGS.pad_mode = 'SYMMETRIC'
+    m_symmetric = _model()
+
+    o_constant = m_constant(model_input)
+    o_symmetric = m_symmetric(model_input)
+
+    for k in o_constant.keys():
+      np.testing.assert_raises(AssertionError, np.testing.assert_array_equal,
+                               o_constant[k], o_symmetric[k])
 
 
 if __name__ == '__main__':

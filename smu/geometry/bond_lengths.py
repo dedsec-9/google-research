@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,6 +35,9 @@ class GetBondLengthDistribution(beam.DoFn):
     bonded = utilities.bonded(bt)
 
     natoms = len(bt.atoms)
+
+    if conformer.fate != dataset_pb2.Conformer.FATE_SUCCESS:
+      return
 
     for a1 in range(0, natoms):
       atomic_number1 = smu_utils_lib.ATOM_TYPE_TO_ATOMIC_NUMBER[bt.atoms[a1]]

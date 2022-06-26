@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -567,7 +567,8 @@ class CompressionOp(CompressionOpInterface):
                                           layer_obj,
                                           weight_params_fn,
                                           weight_init_obj,
-                                          scope='default_scope'):
+                                          scope='default_scope',
+                                          a_matrix_tfvar_shape=None):
     """Returns compressed tensorflow operator for a customized model/layer.
 
     Does this for variable a_matrix_tfvar for
@@ -576,7 +577,7 @@ class CompressionOp(CompressionOpInterface):
     a_matrix by alpha*a_matrix + (1-alpha)b_matrix*c_matrix.
 
     Args:
-      a_matrix_tfvar: TF variable representihg a tensor variable in a model.
+      a_matrix_tfvar: TF variable representing a tensor variable in a model.
       matrix_compressor: MatrixCompressorInferface object to specify the
         compression algorithm. Must return two matrices b_matrix,c_matrix in its
         compression.
@@ -584,12 +585,17 @@ class CompressionOp(CompressionOpInterface):
       weight_params_fn: functional handle to create model parameters.
       weight_init_obj: a weight initialization object.
       scope: TF scope used for creating new TF variables.
+      a_matrix_tfvar_shape: A list specifying the shape of the tensor to
+        compress. In some cases when a_matrix_tfvar is set to None,
+        this field is used to pass in the shape of the matrix to compress.
 
     Returns:
       A TF node that has the compressed version of a_matrix_tfvar.
     """
+    shape = (a_matrix_tfvar.shape if a_matrix_tfvar is not None
+             else a_matrix_tfvar_shape)
     self.matrix_compressor = matrix_compressor
-    a_matrix = np.zeros(shape=a_matrix_tfvar.shape)
+    a_matrix = np.zeros(shape=shape)
     [b_matrix, c_matrix] = matrix_compressor.static_matrix_compressor(a_matrix)
 
     p = layer_obj.params
@@ -627,7 +633,7 @@ class CompressionOp(CompressionOpInterface):
       self.add_compression_summaries()
     return [self.final_op, self.update_op]
 
-  def get_mix_operator(self, theta, concat):
+  def get_mix_operator(self, theta, concat, layer_obj=None):
     """Performs matrix multiplication for customized layer.
 
     This performs the compressed equivalent of tf.matmul(concat, theta.wm).
@@ -635,11 +641,13 @@ class CompressionOp(CompressionOpInterface):
     Args:
       theta: object in customized layer that contains weight tensors, etc.
       concat: the left operand of the matmul operation.
+      layer_obj: reference to the customized layer object. default is None.
 
     Returns:
       A TensorFlow node that has compressed version of
       tf.matmul(concat, theta.wm).
     """
+    del layer_obj  # Unused by get_mix_operator here
     return (theta.alpha * tf.matmul(concat, theta.wm) +
             (1 - theta.alpha) * tf.matmul(
                 tf.matmul(concat, theta.b_matrix_tfvar), theta.c_matrix_tfvar))
@@ -1073,7 +1081,8 @@ class InputOutputCompressionOp(CompressionOpInterface):
                                           layer_obj,
                                           weight_params_fn,
                                           weight_init_obj,
-                                          scope='default_scope'):
+                                          scope='default_scope',
+                                          a_matrix_tfvar_shape=None):
     """Returns input (and) or output compressed operator for a babelfish layer.
 
     Args:
@@ -1085,10 +1094,15 @@ class InputOutputCompressionOp(CompressionOpInterface):
       weight_params_fn: functional handle to create model parameters.
       weight_init_obj: a weight initialization object.
       scope: TF scope used for creating new TF variables.
+      a_matrix_tfvar_shape: A list specifying the shape of the tensor to
+        compress. In some cases when a_matrix_tfvar is set to None,
+        this field is used to pass in the shape of the matrix to compress.
 
     Returns:
       A TF node that has the compressed version of a_matrix_tfvar.
     """
+    shape = (a_matrix_tfvar.shape if a_matrix_tfvar is not None
+             else a_matrix_tfvar_shape)
     self.matrix_compressor = matrix_compressor
     with tf.variable_scope(scope) as scope:
       if self._spec.compress_input:
@@ -1108,8 +1122,8 @@ class InputOutputCompressionOp(CompressionOpInterface):
       # shape of c determined by whether input-side and output-side compression
       # are turned on.
       c_matrix_pc = weight_params_fn([
-          a_matrix_tfvar.shape[0] // self._spec.input_compression_factor,
-          a_matrix_tfvar.shape[1] // self._spec.output_compression_factor
+          shape[0] // self._spec.input_compression_factor,
+          shape[1] // self._spec.output_compression_factor
       ], weight_init_obj.Xavier(1.0), layer_obj.params.dtype)
 
       # create the TF variables using babelfish variable creation function
@@ -1283,7 +1297,7 @@ class InputOutputCompressionOp(CompressionOpInterface):
       compressed_result = intermediate_result
     return compressed_result
 
-  def get_mix_operator(self, theta, concat):
+  def get_mix_operator(self, theta, concat, layer_obj=None):
     """Performs matrix multiplication on compressed input for Babelfish LSTM layers.
 
     This performs the input (and/or) output compressed equivalent of
@@ -1292,6 +1306,7 @@ class InputOutputCompressionOp(CompressionOpInterface):
     Args:
       theta: object in customized layer that contains weight tensors, etc.
       concat: the left operand of the matmul operation. a rank 2 tensor.
+      layer_obj: reference to the customized layer object. default is None.
 
     Returns:
       A TensorFlow node that has compressed version of
@@ -1308,7 +1323,12 @@ class InputOutputCompressionOp(CompressionOpInterface):
           ],
                     axis=0))
       # project blocked_left_operand down using b.
-      projected_blocked_concat = tf.matmul(blocked_concat, theta.b_matrix_tfvar)
+      if layer_obj is not None:
+        b_matrix_tfvar = layer_obj.QWeight(theta.b_matrix_tfvar,
+                                           'b_compression')
+      else:
+        b_matrix_tfvar = theta.b_matrix_tfvar
+      projected_blocked_concat = tf.matmul(blocked_concat, b_matrix_tfvar)
       # flatten the block dimension in projected_blocked_concat.
       compressed_concat = tf.reshape(
           projected_blocked_concat,
@@ -1320,7 +1340,11 @@ class InputOutputCompressionOp(CompressionOpInterface):
       compressed_concat = concat
 
     # multiply compressed concat with c.
-    intermediate_result = tf.matmul(compressed_concat, theta.c_matrix_tfvar)
+    if layer_obj is not None:
+      c_matrix_tfvar = layer_obj.QWeight(theta.c_matrix_tfvar, 'c_compression')
+    else:
+      c_matrix_tfvar = theta.c_matrix_tfvar
+    intermediate_result = tf.matmul(compressed_concat, c_matrix_tfvar)
 
     if self._spec.compress_output:
       # block intermediate_result into blocks
@@ -1333,8 +1357,13 @@ class InputOutputCompressionOp(CompressionOpInterface):
           ],
                     axis=0))
       # project blocked_intermediate_result up using d.
+      if layer_obj is not None:
+        d_matrix_tfvar = layer_obj.QWeight(theta.d_matrix_tfvar,
+                                           'd_compression')
+      else:
+        d_matrix_tfvar = theta.d_matrix_tfvar
       projected_intermediate_result = tf.matmul(blocked_intermediate_result,
-                                                theta.d_matrix_tfvar)
+                                                d_matrix_tfvar)
       # flatten the block dimension
       compressed_result = tf.reshape(
           projected_intermediate_result,
@@ -1384,7 +1413,12 @@ class InputOutputCompressionOp(CompressionOpInterface):
           self._spec.input_block_size
       ])
       # project blocked_inputs down using b.
-      projected_blocked_inputs = tf.matmul(blocked_inputs, theta.b_matrix_tfvar)
+      if layer_obj is not None:
+        b_matrix_tfvar = layer_obj.QWeight(theta.b_matrix_tfvar,
+                                           'b_compression')
+      else:
+        b_matrix_tfvar = theta.b_matrix_tfvar
+      projected_blocked_inputs = tf.matmul(blocked_inputs, b_matrix_tfvar)
       # flatten the block dimension in projected_blocked_inputs.
       compressed_inputs = tf.reshape(
           projected_blocked_inputs,
@@ -1393,7 +1427,11 @@ class InputOutputCompressionOp(CompressionOpInterface):
       compressed_inputs = inputs
 
     # multiply compressed inputs with c.
-    intermediate_result = tf.matmul(compressed_inputs, theta.c_matrix_tfvar)
+    if layer_obj is not None:
+      c_matrix_tfvar = layer_obj.QWeight(theta.c_matrix_tfvar, 'c_compression')
+    else:
+      c_matrix_tfvar = theta.c_matrix_tfvar
+    intermediate_result = tf.matmul(compressed_inputs, c_matrix_tfvar)
 
     if self._spec.compress_output:
       # block intermediate_result into blocks
@@ -1402,8 +1440,13 @@ class InputOutputCompressionOp(CompressionOpInterface):
           intermediate_result,
           [tf.shape(intermediate_result)[0], -1, block_size])
       # project blocked_intermediate_result up using d.
+      if layer_obj is not None:
+        d_matrix_tfvar = layer_obj.QWeight(theta.d_matrix_tfvar,
+                                           'd_compression')
+      else:
+        d_matrix_tfvar = theta.d_matrix_tfvar
       projected_intermediate_result = tf.matmul(blocked_intermediate_result,
-                                                theta.d_matrix_tfvar)
+                                                d_matrix_tfvar)
       # flatten the block dimension
       compressed_result = tf.reshape(
           projected_intermediate_result,
@@ -1513,7 +1556,7 @@ class BlockCompressionOp(CompressionOpInterface):
     super(BlockCompressionOp, self).__init__(scope, spec, global_step)
     # Compression specification
     self._spec = spec if spec else self.get_default_hparams()
-    logging.info('Compression spec in init CompressionOp is: ')
+    logging.info('Compression spec in init BlockCompressionOp is: ')
     self.print_hparams()
     self._global_step = self._setup_global_step(global_step)
 
@@ -1581,12 +1624,14 @@ class BlockCompressionOp(CompressionOpInterface):
     with tf.name_scope(self._spec.name + '_summaries'):
       logging.info('add_compression_summaries scope name is %s',
                    self._spec.name)
-      tf.compat.v2.summary.scalar(
-          self.a_matrix_tfvar.op.name + '/a_matrix_norm',
-          tf.norm(self.a_matrix_tfvar))
-      tf.compat.v2.summary.scalar(
-          self.c_matrix_tfvar.op.name + '/c_matrix_norm',
-          tf.norm(self.c_matrix_tfvar))
+      if self.a_matrix_tfvar is not None:
+        tf.compat.v2.summary.scalar(
+            self.a_matrix_tfvar.op.name + '/a_matrix_norm',
+            tf.norm(self.a_matrix_tfvar))
+      if self.c_matrix_tfvar is not None:
+        tf.compat.v2.summary.scalar(
+            self.c_matrix_tfvar.op.name + '/c_matrix_norm',
+            tf.norm(self.c_matrix_tfvar))
 
   def get_apply_compression_op(self,
                                a_matrix_tfvar,
@@ -1660,7 +1705,8 @@ class BlockCompressionOp(CompressionOpInterface):
                                           layer_obj,
                                           weight_params_fn,
                                           weight_init_obj,
-                                          scope='default_scope'):
+                                          scope='default_scope',
+                                          a_matrix_tfvar_shape=None):
     """Returns compressed operator for block diagonal compression.
 
     Args:
@@ -1672,34 +1718,39 @@ class BlockCompressionOp(CompressionOpInterface):
       weight_params_fn: functional handle to create model parameters.
       weight_init_obj: a weight initialization object.
       scope: TF scope used for creating new TF variables.
+      a_matrix_tfvar_shape: A list specifying the shape of the tensor to
+        compress. In some cases when a_matrix_tfvar is set to None,
+        this field is used to pass in the shape of the matrix to compress.
 
     Returns:
       A TF node that has the compressed version of a_matrix_tfvar.
     """
+    shape = (a_matrix_tfvar.shape if a_matrix_tfvar is not None
+             else a_matrix_tfvar_shape)
     self.matrix_compressor = matrix_compressor
     with tf.variable_scope(scope) as scope:
       if self._spec.block_method == 'mask':
         # c_matrix has same shape as a_matrix
-        c_matrix_pc = weight_params_fn(a_matrix_tfvar.shape,
+        c_matrix_pc = weight_params_fn(shape,
                                        weight_init_obj.Xavier(1.0),
                                        layer_obj.params.dtype)
         # create block diagonal mask for c_matrix
         num_blocks = self._spec.block_compression_factor
-        num_rows, num_cols = a_matrix_tfvar.shape.as_list()
+        num_rows, num_cols = shape.as_list()
         r_block, c_block = num_rows // num_blocks, num_cols // num_blocks
         c_mask = np.array(
             [[float(j // c_block == i // r_block)
               for j in range(num_cols)]
              for i in range(num_rows)])
-        c_mask_pc = weight_params_fn(a_matrix_tfvar.shape,
+        c_mask_pc = weight_params_fn(shape,
                                      weight_init_obj.Constant(c_mask),
                                      layer_obj.params.dtype)
       elif self._spec.block_method == 'loop':
         # c_matrix is a rank 3 tensor consisting of num_blocks blocks
         num_blocks = self._spec.block_compression_factor
         c_matrix_pc = weight_params_fn([
-            num_blocks, a_matrix_tfvar.shape[0] // num_blocks,
-            a_matrix_tfvar.shape[1] // num_blocks
+            num_blocks, shape[0] // num_blocks,
+            shape[1] // num_blocks
         ], weight_init_obj.Xavier(1.0), layer_obj.params.dtype)
 
       # create the c_matrix and c_mask variables
@@ -1745,7 +1796,7 @@ class BlockCompressionOp(CompressionOpInterface):
         output_splitted.append(tf.matmul(input_i, self.c_matrix_tfvar[i, :, :]))
       return tf.concat(output_splitted, axis=-1)
 
-  def get_mix_operator(self, theta, concat):
+  def get_mix_operator(self, theta, concat, layer_obj=None):
     """Performs matrix multiplication on customized LSTM layers.
 
     This performs the block diagonal compressed equivalent of
@@ -1754,11 +1805,13 @@ class BlockCompressionOp(CompressionOpInterface):
     Args:
       theta: object in customized layer that contains weight tensors, etc.
       concat: the left operand of the matmul operation. a rank 2 tensor.
+      layer_obj: reference to the customized layer object. default is None.
 
     Returns:
       A TensorFlow node that has compressed version of
       tf.matmul(concat, theta.wm).
     """
+    del layer_obj  # Unused within get_mix_operator here.
     if self._spec.block_method == 'mask':
       return tf.matmul(concat,
                        tf.multiply(theta.c_matrix_tfvar, theta.c_mask_tfvar))
@@ -1855,6 +1908,33 @@ class MixedBlockCompressionOp(CompressionOp):
     outputs.
   """
 
+  def __init__(self, scope='default_scope', spec=None, global_step=None):
+    """Initializer.
+
+    Args:
+      scope: TF scope used for creating new TF variables.
+      spec: compression hyper parameters default value given by
+        self.get_default_hparams().
+      global_step: tf variable that has the global step.
+    """
+    super(MixedBlockCompressionOp, self).__init__(scope, spec, global_step)
+    # Compression specification
+    self._spec = spec if spec else self.get_default_hparams()
+    logging.info('Compression spec in init MixedBlockCompressionOp is: ')
+    self.print_hparams()
+    self._global_step = self._setup_global_step(global_step)
+
+    # public member variables to track the compressor, the variables and
+    # other tf nodes corresponding to this OP.
+    self.matrix_compressor = None
+    self.a_matrix_tfvar = None
+    self.block_matrices = None
+    self.linear_mixer = None
+    self.final_op = None
+
+    self.uncompressed_size = 0
+    self.compressed_size = 0
+
   @staticmethod
   def get_default_hparams():
     """Get a tf.HParams object with the default values for the hyperparameters.
@@ -1869,10 +1949,7 @@ class MixedBlockCompressionOp(CompressionOp):
       rank: integer
         indicates what type of factorization (if any) is used.
       update_option: integer
-        indicates how the update logic is being run. More specifically:
-        0 - run the update logic in TF; needed when using GPU/TPU.
-        1 - run the update logic in regular python as opposed to TF.
-        2 - run the update logic in TF and in regular python.
+        indicates how the update logic is being run.
       TODO(wanxin): add doc strings for pruning hparams.
 
     Returns:
@@ -2053,26 +2130,24 @@ class MixedBlockCompressionOp(CompressionOp):
     # block the left_operand tensor into num_blocks
     blocked_input = tf.reshape(left_operand, [
         tf.shape(left_operand)[0],
-        num_blocks,
         tf.shape(left_operand)[1] // num_blocks,
+        num_blocks,
     ])
 
     # compute the matmul of each block with corresponding block_matrix
-    intermediate_splitted = []
-    for i in range(num_blocks):
-      intermediate_splitted.append(
-          tf.matmul(blocked_input[:, i, :], self.block_matrices[:, :, i]))
+    intermediate_splitted = tf.einsum('abc,bdc->adc', blocked_input,
+                                      self.block_matrices)
 
     # compute the linear combinations of the above intermediate outputs
     output_splitted = []
     for k in range(num_bases):
       output_splitted.append([])
       for i in range(num_blocks):
-        output_splitted[-1].append(intermediate_splitted[0] *
+        output_splitted[-1].append(intermediate_splitted[:, :, 0] *
                                    self.linear_mixer[i, 0, k])
         for j in range(1, num_blocks):
-          output_splitted[-1][-1] = output_splitted[
-              -1][-1] + intermediate_splitted[j] * self.linear_mixer[i, j, k]
+          output_splitted[-1][-1] = output_splitted[-1][
+              -1] + intermediate_splitted[:, :, j] * self.linear_mixer[i, j, k]
 
     reduced_output_splitted = []
     for i in range(num_blocks):
@@ -2084,7 +2159,7 @@ class MixedBlockCompressionOp(CompressionOp):
     output = tf.concat(reduced_output_splitted, axis=-1)
     return output
 
-  def get_mix_operator(self, theta, concat):
+  def get_mix_operator(self, theta, concat, layer_obj=None):
     """Performs matrix multiplication on customized LSTM layers.
 
     This performs the block diagonal compressed equivalent of
@@ -2093,6 +2168,7 @@ class MixedBlockCompressionOp(CompressionOp):
     Args:
       theta: object in customized layer that contains weight tensors, etc.
       concat: the left operand of the matmul operation. a rank 2 tensor.
+      layer_obj: reference to the customized layer object. default is None.
 
     Returns:
       A TensorFlow node that has compressed version of
@@ -2109,26 +2185,24 @@ class MixedBlockCompressionOp(CompressionOp):
     # block the concat tensor into num_blocks
     blocked_input = tf.reshape(concat, [
         tf.shape(concat)[0],
-        num_blocks,
         tf.shape(concat)[1] // num_blocks,
+        num_blocks,
     ])
 
     # compute the matmul of each block with corresponding block_matrix
-    intermediate_splitted = []
-    for i in range(num_blocks):
-      intermediate_splitted.append(
-          tf.matmul(blocked_input[:, i, :], theta.block_matrices[:, :, i]))
+    intermediate_splitted = tf.einsum('abc,bdc->adc', blocked_input,
+                                      theta.block_matrices)
 
     # compute the linear combinations of the above intermediate outputs
     output_splitted = []
     for k in range(num_bases):
       output_splitted.append([])
       for i in range(num_blocks):
-        output_splitted[-1].append(intermediate_splitted[0] *
+        output_splitted[-1].append(intermediate_splitted[:, :, 0] *
                                    theta.linear_mixer[i, 0, k])
         for j in range(1, num_blocks):
-          output_splitted[-1][-1] = output_splitted[
-              -1][-1] + intermediate_splitted[j] * theta.linear_mixer[i, j, k]
+          output_splitted[-1][-1] = output_splitted[-1][
+              -1] + intermediate_splitted[:, :, j] * theta.linear_mixer[i, j, k]
 
     reduced_output_splitted = []
     for i in range(num_blocks):
@@ -2177,26 +2251,24 @@ class MixedBlockCompressionOp(CompressionOp):
     # block the inputs tensor into num_blocks
     blocked_input = tf.reshape(inputs, [
         tf.shape(inputs)[0],
-        num_blocks,
         tf.shape(inputs)[1] // num_blocks,
+        num_blocks,
     ])
 
     # compute the matmul of each block with corresponding block_matrix
-    intermediate_splitted = []
-    for i in range(num_blocks):
-      intermediate_splitted.append(
-          tf.matmul(blocked_input[:, i, :], theta.block_matrices[:, :, i]))
+    intermediate_splitted = tf.einsum('abc,bdc->adc', blocked_input,
+                                      theta.block_matrices)
 
     # compute the linear combinations of the above intermediate outputs
     output_splitted = []
     for k in range(num_bases):
       output_splitted.append([])
       for i in range(num_blocks):
-        output_splitted[-1].append(intermediate_splitted[0] *
+        output_splitted[-1].append(intermediate_splitted[:, :, 0] *
                                    theta.linear_mixer[i, 0, k])
         for j in range(1, num_blocks):
-          output_splitted[-1][-1] = output_splitted[
-              -1][-1] + intermediate_splitted[j] * theta.linear_mixer[i, j, k]
+          output_splitted[-1][-1] = output_splitted[-1][
+              -1] + intermediate_splitted[:, :, j] * theta.linear_mixer[i, j, k]
 
     reduced_output_splitted = []
     for i in range(num_blocks):
@@ -2231,18 +2303,14 @@ class MixedBlockCompressionOp(CompressionOp):
     num_blocks = self._spec.compression_factor
     num_bases = self._spec.num_bases
 
-    # block the inputs tensor into num_blocks
-    blocked_input = tf.reshape(inputs, [
-        tf.shape(inputs)[0],
-        num_blocks,
-        tf.shape(inputs)[1] // num_blocks,
-    ])
+    # split the inputs tensor into num_blocks along its last axis
+    input_splitted = tf.split(inputs, num_blocks, axis=-1)
 
     # compute the matmul of each block with corresponding block_matrix
     intermediate_splitted = []
-    for i in range(num_blocks):
+    for i, input_i in enumerate(input_splitted):
       intermediate_splitted.append(
-          tf.matmul(blocked_input[:, i, :], theta.block_matrices[:, :, i]))
+          tf.matmul(input_i, theta.block_matrices[:, :, i]))
 
     # compute the linear combinations of the above intermediate outputs
     output_splitted = []

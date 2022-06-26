@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ import tensorflow as tf
 
 
 # Gets flags from data_prep's main.
-from non_semantic_speech_benchmark.data_prep import audio_to_embeddings_beam_main as data_prep  # pylint:disable=unused-import
+from non_semantic_speech_benchmark.data_prep import audio_to_embeddings_beam_flags  # pylint:disable=unused-import
 from non_semantic_speech_benchmark.data_prep import audio_to_embeddings_beam_utils as utils
 from non_semantic_speech_benchmark.eval_embedding.sklearn import train_and_eval_sklearn as sklearn_utils
 
@@ -52,12 +52,22 @@ flags.DEFINE_string('save_predictions_dir', None,
                     'If not `None`, write numpy array of predictions on '
                     'train, eval, and test into this directory.')
 flags.DEFINE_list('label_list', None, 'Python list of possible label values.')
-flags.DEFINE_enum('eval_metric', 'accuracy', [
-    'accuracy', 'balanced_accuracy', 'equal_error_rate',
-    'unweighted_average_recall', 'auc'
-], 'Which metric to compute and report.')
+flags.DEFINE_list('eval_metrics', 'accuracy',
+                  'Which metric to compute and report.')
 
 FLAGS = flags.FLAGS
+
+
+def _remove_existing_outputs(
+    input_filenames_list,
+    output_filenames):
+  """If files exists, don't write to output, and remove corresponding inputs."""
+  filtered_inputs, filtered_outputs = [], []
+  for cur_input_list, cur_output in zip(input_filenames_list, output_filenames):
+    if not tf.io.gfile.glob(f'{cur_output}*'):
+      filtered_inputs.append(cur_input_list)
+      filtered_outputs.append(cur_output)
+  return filtered_inputs, filtered_outputs
 
 
 def _get_data_prep_params_from_flags(
@@ -104,7 +114,12 @@ def _get_data_prep_params_from_flags(
         prep_params['module_output_keys'])
   except ValueError:
     if FLAGS.skip_existing_error:
-      run_data_prep = False
+      # Check if there are any files left after filtering. Return the expected
+      # locations, though, and remove.
+      _, output_filenames_filtered = _remove_existing_outputs(
+          input_filenames_list, output_filenames)
+      if not output_filenames_filtered:
+        run_data_prep = False
     else:
       raise
 
@@ -132,7 +147,7 @@ def main(unused_argv):
       label_list=FLAGS.label_list,
       save_model_dir=FLAGS.save_model_dir,
       save_predictions_dir=FLAGS.save_predictions_dir,
-      eval_metric=FLAGS.eval_metric,
+      eval_metrics=FLAGS.eval_metrics,
   )
   logging.info('exp_params: %s', exp_params)
 
@@ -140,6 +155,8 @@ def main(unused_argv):
   beam_options = None
 
   if run_data_prep:
+    input_filenames_list, output_filenames = _remove_existing_outputs(
+        input_filenames_list, output_filenames)
     logging.info('Data prep on: %s, %s...', input_filenames_list,
                  output_filenames)
     with beam.Pipeline(beam_options) as root:

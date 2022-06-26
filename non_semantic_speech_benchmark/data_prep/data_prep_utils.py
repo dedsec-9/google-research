@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Utils for data prep beam jobs.
 
 1) `data_prep_utils.py` contains low-level utils.
@@ -105,8 +104,8 @@ def samples_to_embedding_tfhub(
     ret = tf_out
   ret = np.array(ret)
   if ret.ndim > 2:
-    # Batch-flatten in numpy.
-    ret = np.reshape(ret, [ret.shape[0], -1])
+    # Squeeze all possible dimensions, and hope the dimension is correct.
+    ret = np.squeeze(ret)
   return ret
 
 
@@ -251,6 +250,7 @@ def add_embeddings_to_tfex(
     k_v,
     original_example_key,
     delete_audio_from_output,
+    pass_through_normalized_audio,
     audio_key,
     label_key,
     speaker_id_key):
@@ -282,6 +282,14 @@ def add_embeddings_to_tfex(
 
   if delete_audio_from_output:
     ex.features.feature.pop(audio_key, None)
+  else:
+    # If audio is an int, store a normalized version of it instead.
+    if (pass_through_normalized_audio and
+        ex.features.feature[audio_key].int64_list):
+      audio_int = np.array(ex.features.feature[audio_key].int64_list.value)
+      ex.features.feature.pop(audio_key, None)
+      ex.features.feature[audio_key].float_list.value.extend(
+          audio_int.astype(np.float32) / np.iinfo(np.int16).max)
 
   # Assert that the label is present. If it's a integer, convert it to bytes.
   if label_key:
@@ -306,6 +314,7 @@ def add_embeddings_to_tfex(
 def combine_multiple_embeddings_to_tfex(
     k_v,
     delete_audio_from_output,
+    pass_through_normalized_audio,
     audio_key,
     label_key,
     speaker_id_key):
@@ -321,6 +330,14 @@ def combine_multiple_embeddings_to_tfex(
 
   if delete_audio_from_output:
     ex.features.feature.pop(audio_key, None)
+  else:
+    # If audio is an int, store a normalized version of it instead.
+    if (pass_through_normalized_audio and
+        ex.features.feature[audio_key].int64_list):
+      audio_int = np.array(ex.features.feature[audio_key].int64_list.value)
+      ex.features.feature.pop(audio_key, None)
+      ex.features.feature[audio_key].float_list.value.extend(
+          audio_int.astype(np.float32) / np.iinfo(np.int16).max)
 
   for name, embedding in out_dict.items():
     assert isinstance(embedding, np.ndarray)
@@ -351,8 +368,9 @@ def combine_multiple_embeddings_to_tfex(
 def chunked_audio_to_tfex(
     k_v,
     delete_audio_from_output,
+    pass_through_normalized_audio,
     chunk_len,
-    audio_key = 'audio',
+    audio_key = 'processed/audio_samples',
     label_key = 'label',
     speaker_id_key = 'speaker_id',
     embedding_length = 1024):
@@ -374,17 +392,17 @@ def chunked_audio_to_tfex(
     raise ValueError(f'Audio len wrong: {chunk_len} vs {audio.shape}')
 
   ex = tf.train.Example()
-
-  ex.features.feature[audio_key].float_list.value.extend(audio.reshape([-1]))
+  if not delete_audio_from_output:
+    assert audio.dtype == np.float32
+    if pass_through_normalized_audio:
+      audio = audio.astype(np.float32) / np.iinfo(np.int16).max
+    ex.features.feature[audio_key].float_list.value.extend(
+        audio.reshape([-1]))
+    # Add the hash of the audio as a key.
+    ex = add_key_to_audio(ex, audio_key)
 
   for name, emb in embs_dict.items():
     ex = add_embedding_to_tfexample(ex, emb, f'embedding/{name}')
-
-  # Add the hash of the audio as a key.
-  ex = add_key_to_audio(ex, audio_key)
-
-  if delete_audio_from_output:
-    ex.features.feature.pop(audio_key, None)
 
   # Pass the label through, if it exists.
   if lbl:
@@ -393,6 +411,33 @@ def chunked_audio_to_tfex(
   # Pass the speaker_id through, if it exists.
   if speaker_id:
     ex.features.feature[speaker_id_key].bytes_list.value.append(speaker_id)
+
+  return k, ex
+
+
+def single_audio_emb_to_tfex(
+    k_v,
+    embedding_name,
+    audio_key = 'audio',
+    embedding_length = 1024):
+  """Make simple (audio, embedding) pair into a tf.Example."""
+  k, audio, emb = k_v
+
+  # Sanity checks.
+  if emb.ndim != 1:
+    raise ValueError(f'Embedding dims wrong: {emb.ndim}')
+  if embedding_length and emb.shape[0] != embedding_length:
+    raise ValueError(
+        f'Feature dim wrong: {emb.shape[0]} vs {embedding_length}')
+  if audio.ndim != 1:
+    raise ValueError(f'Audio wrong shape: {audio.shape}')
+
+  ex = tf.train.Example()
+  ex.features.feature[audio_key].float_list.value.extend(audio.reshape([-1]))
+  ex = add_embedding_to_tfexample(ex, emb, f'embedding/{embedding_name}')
+
+  # Add the hash of the audio as a key.
+  ex = add_key_to_audio(ex, audio_key)
 
   return k, ex
 

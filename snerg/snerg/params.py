@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Parameters and parameter-related functions for SNeRG baking."""
 
 import numpy as np
@@ -91,7 +90,7 @@ def initialize_params(args):
                                                     [0.0, 0.0, 1.0, 0.0],
                                                     [0.0, 1.0, 0.0, 0.0],
                                                     [0.0, 0.0, 0.0, 1.0]])
-  elif args.dataset == 'llff':
+  elif (args.dataset == 'llff' and not args.spherify):
     # Use a hard-coded flip for NDC scenes.
     scene_params['worldspace_T_opengl'] = np.array([[1.0, 0.0, 0.0, 0.0],
                                                     [0.0, 1.0, 0.0, 0.0],
@@ -103,7 +102,7 @@ def initialize_params(args):
                                                     [0.0, 0.0, 1.0, 0.0],
                                                     [0.0, 0.0, 0.0, 1.0]])
 
-  scene_params['ndc'] = (args.dataset == 'llff')
+  scene_params['ndc'] = (args.dataset == 'llff' and not args.spherify)
   scene_params['voxel_resolution'] = args.voxel_resolution
   scene_params['white_bkgd'] = args.white_bkgd
   scene_params['near'] = args.near

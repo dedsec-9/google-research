@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,7 +57,10 @@ def get_bond_length_distribution_inner(input_fname, output_fname):
       post-processing to generate bond length distribution files.
   """
   print("Reading from {input_fname} output to {output_fname}")
-  with beam.Pipeline(options=PipelineOptions()) as p:
+  options = PipelineOptions(
+      direct_num_workers=6, direct_running_mode="multi_processing")
+  # options = PipelineOptions()
+  with beam.Pipeline(options=options) as p:
     protos = (
         p
         | beam.io.tfrecordio.ReadFromTFRecord(

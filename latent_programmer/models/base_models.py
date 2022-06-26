@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,9 +51,20 @@ class TransformerConfig:
   mlp_dim: int = 512
   max_len: int = 2048
   dropout_rate: float = 0.1
-  attention_dropout_rate: float = 0.0
+  attention_dropout_rate: float = 0.1
   use_relative_attention: bool = False
-  num_relative_position_buckets: int = 32
+  num_input_relative_position_buckets: int = 41
+  max_input_distance: int = 20
+  num_output_relative_position_buckets: int = 160
+  max_output_distance: int = 200
+  num_input_cross_output_relative_position_buckets: int = 160
+  max_input_cross_output_distance: int = 200
+  num_program_relative_position_buckets: int = 101
+  max_program_distance: int = 100
+  num_program_cross_embed_relative_position_buckets: int = 128
+  max_program_cross_embed_distance: int = 800
+  bidirectional_program_attention: bool = False
+
   deterministic: bool = False
   decode: bool = False
   bos_token: int = 1
@@ -211,7 +222,9 @@ class EncoderBlock(nn.Module):
   """Transformer encoder block."""
 
   config: TransformerConfig
-  self_attention_fn: Callable[[Array, Array, Array], Array] = nn.SelfAttention
+  bidirectional_attention: bool = False
+  num_relative_position_buckets: int = 32
+  max_distance: int = 128
 
   @nn.compact
   def __call__(self,
@@ -244,8 +257,10 @@ class EncoderBlock(nn.Module):
           broadcast_dropout=False,
           dropout_rate=cfg.attention_dropout_rate,
           deterministic=cfg.deterministic,
-          num_relative_position_buckets=cfg.num_relative_position_buckets,
-          causal=False)(x, encoder_mask, encoder_relative_position)
+          bidirectional=self.bidirectional_attention,
+          num_relative_position_buckets=self.num_relative_position_buckets,
+          max_distance=self.max_distance)(
+              x, encoder_mask, encoder_relative_position)
     else:
       x = nn.SelfAttention(
           num_heads=cfg.num_heads,
@@ -273,9 +288,14 @@ class EncoderDecoderBlock(nn.Module):
   """Transformer encoder-decoder block."""
 
   config: TransformerConfig
-  dot_product_attention_fn: Callable[[Array, Array, Array], Array] = (
-      nn.MultiHeadDotProductAttention)
-  self_attention_fn: Callable[[Array, Array], Array] = nn.SelfAttention
+  bidirectional_attention: bool = False
+  num_relative_position_buckets: int = 32
+  max_distance: int = 128
+
+  relative_cross_attention: bool = False
+  bidirectional_cross_attention: bool = False
+  num_relative_position_buckets_cross_attention: int = 32
+  max_distance_cross_attention: int = 128
 
   @nn.compact
   def __call__(self,
@@ -293,9 +313,9 @@ class EncoderDecoderBlock(nn.Module):
       decoder_mask: decoder self-attention mask
       encoder_decoder_mask: encoder-decoder attention mask
       decoder_relative_position: decoder relative positions tensor
-         `[batch_sizes..., length2, length2]'
+          `[batch_sizes..., length2, length2]'
       encoder_decoder_relative_position: encoder-decoder relative tensor
-         `[batch_sizes..., length2, length]'
+          `[batch_sizes..., length2, length]'
 
     Returns:
       Decoded data `[batch_size, ..., length2, mlp_dim]`
@@ -315,8 +335,10 @@ class EncoderDecoderBlock(nn.Module):
           broadcast_dropout=False,
           dropout_rate=cfg.attention_dropout_rate,
           deterministic=cfg.deterministic,
-          num_relative_position_buckets=cfg.num_relative_position_buckets,
-          causal=False)(x, decoder_mask, decoder_relative_position)
+          bidirectional=self.bidirectional_attention,
+          num_relative_position_buckets=self.num_relative_position_buckets,
+          max_distance=self.max_distance)(
+              x, decoder_mask, decoder_relative_position)
     else:
       x = nn.SelfAttention(
           num_heads=cfg.num_heads,
@@ -335,7 +357,7 @@ class EncoderDecoderBlock(nn.Module):
 
     # Encoder-Decoder block.
     y = nn.LayerNorm(dtype=cfg.dtype)(x)
-    if cfg.use_relative_attention:
+    if self.relative_cross_attention:
       y = relative_attention.RelativeMultiHeadDotProductAttention(
           num_heads=cfg.num_heads,
           dtype=cfg.dtype,
@@ -346,8 +368,10 @@ class EncoderDecoderBlock(nn.Module):
           broadcast_dropout=False,
           dropout_rate=cfg.attention_dropout_rate,
           deterministic=cfg.deterministic,
-          num_relative_position_buckets=cfg.num_relative_position_buckets,
-          causal=False)(
+          bidirectional=self.bidirectional_cross_attention,
+          num_relative_position_buckets=(
+              self.num_relative_position_buckets_cross_attention),
+          max_distance=self.max_distance_cross_attention)(
               y, encoded, encoder_decoder_mask,
               encoder_decoder_relative_position)
     else:
@@ -397,9 +421,9 @@ class TransformerDecoder(nn.Module):
       decoder_mask: decoder self-attention mask
       encoder_decoder_mask: encoder-decoder attention mask
       decoder_relative_position: decoder relative positions tensor
-         `[batch_sizes..., length2, length2]'
+          `[batch_sizes..., length2, length2]'
       encoder_decoder_relative_position: encoder-decoder relative tensor
-         `[batch_sizes..., length2, length]'
+          `[batch_sizes..., length2, length]'
 
     Returns:
       output of a transformer decoder.
@@ -431,6 +455,15 @@ class TransformerDecoder(nn.Module):
     for lyr in range(cfg.num_layers):
       y = EncoderDecoderBlock(
           config=cfg,
+          bidirectional_attention=cfg.bidirectional_program_attention,
+          num_relative_position_buckets=(
+              cfg.num_program_relative_position_buckets),
+          max_distance=cfg.max_program_distance,
+          relative_cross_attention=cfg.use_relative_attention,
+          bidirectional_cross_attention=True,
+          num_relative_position_buckets_cross_attention=(
+              cfg.num_program_cross_embed_relative_position_buckets),
+          max_distance_cross_attention=cfg.max_program_cross_embed_distance,
           name=f'encoderdecoderblock_{lyr}')(
               y, encoded, decoder_mask, encoder_decoder_mask,
               decoder_relative_position, encoder_decoder_relative_position)
@@ -455,7 +488,7 @@ class TransformerDecoder(nn.Module):
 
 
 class TransformerIOEncoder(nn.Module):
-  """Transformer encoder for i/o examples."""
+  """Transformer encoder for i/o examples using double-attention."""
 
   config: TransformerConfig
 
@@ -481,9 +514,6 @@ class TransformerIOEncoder(nn.Module):
         embedding_init=nn.initializers.normal(stddev=1.0),
         name='embed')
 
-    if not cfg.use_relative_attention:
-      pos_emb = AddPositionEmbs(config=cfg, cache=False, name='posembed_io')
-
     x = inputs.astype('int32')
     y = outputs.astype('int32')
 
@@ -498,6 +528,7 @@ class TransformerIOEncoder(nn.Module):
     # Embed inputs.
     x = embed(x)
     if not cfg.use_relative_attention:
+      pos_emb = AddPositionEmbs(config=cfg, cache=False, name='posembed_io')
       x = pos_emb(x)
     x = nn.Dropout(rate=cfg.dropout_rate)(
         x, deterministic=cfg.deterministic)
@@ -506,6 +537,10 @@ class TransformerIOEncoder(nn.Module):
     for lyr in range(cfg.num_layers):
       x = EncoderBlock(   # Attend to inputs.
           config=cfg,
+          bidirectional_attention=True,
+          num_relative_position_buckets=(
+              cfg.num_input_relative_position_buckets),
+          max_distance=cfg.max_input_distance,
           name=f'encoderblock_{lyr}')(x, inputs_encoder_mask)
     x = nn.LayerNorm(dtype=cfg.dtype, name='encoder_norm')(x)
 
@@ -520,6 +555,15 @@ class TransformerIOEncoder(nn.Module):
     for lyr in range(cfg.num_layers):
       y = EncoderDecoderBlock(   # Double attend to inputs and outputs.
           config=encode_decoder_cfg,
+          bidirectional_attention=True,
+          num_relative_position_buckets=(
+              cfg.num_output_relative_position_buckets),
+          max_distance=cfg.max_output_distance,
+          relative_cross_attention=cfg.use_relative_attention,
+          bidirectional_cross_attention=True,
+          num_relative_position_buckets_cross_attention=(
+              cfg.num_input_cross_output_relative_position_buckets),
+          max_distance_cross_attention=cfg.max_input_cross_output_distance,
           name=f'encoderdecoderblock_{lyr}')(
               y, x, outputs_encoder_mask, encoder_decoder_mask)
     y = nn.LayerNorm(dtype=cfg.dtype, name='encoderdecoder_norm')(y)
@@ -591,3 +635,50 @@ class ProgramTransformer(nn.Module):
     encoded_padding_mask = jnp.where(outputs > 0, 1, 0).astype(jnp.float32)
 
     return self.decode(programs, encoded, encoded_padding_mask)
+
+
+class TransformerEncoder(nn.Module):
+  """Vanilla Transformer encoder."""
+
+  config: TransformerConfig
+
+  @nn.compact
+  def __call__(self, inputs, dummy):
+    """Vanilla Transformer encoder.
+
+    Args:
+      inputs: input data [batch_size, num_io, length]
+      dummy: unused for SCAN dataset.
+    Returns:
+      Encoded inputs `[batch_size, num_io, length, dim]`
+    """
+    del dummy
+    # TODO(kshi): possibly use dummy for RobustFill.
+
+    cfg = self.config
+
+    # Inputs and outputs shared embeddings.
+    embed = nn.Embed(
+        num_embeddings=cfg.vocab_size,
+        features=cfg.emb_dim,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        name='embed')
+
+    x = inputs.astype('int32')
+    encoder_mask = nn.make_attention_mask(x > 0, x > 0, dtype=cfg.dtype)
+
+    # Embed outputs.
+    x = embed(x)
+    if not cfg.use_relative_attention:
+      pos_emb = AddPositionEmbs(config=cfg, cache=False, name='posembed_io')
+      x = pos_emb(x)
+    x = nn.Dropout(rate=cfg.dropout_rate)(
+        x, deterministic=cfg.deterministic)
+
+    for lyr in range(cfg.num_layers):
+      x = EncoderBlock(   # Attend to inputs.
+          config=cfg,
+          name=f'encoderblock_{lyr}')(x, encoder_mask)
+    y = nn.LayerNorm(dtype=cfg.dtype, name='encoder_norm')(x)
+
+    return y

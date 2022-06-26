@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,18 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
+# Copyright 2022 The Google Research Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """This class provides shared utilities for parsing and writing SMU7 files."""
 
 import collections
 import csv
 import enum
+import itertools
 import numpy as np
-import pandas as pd
 from rdkit import Chem
 from rdkit import Geometry
-
-from tensorflow.io import gfile
 
 from smu import dataset_pb2
 
@@ -46,6 +57,16 @@ ATOM_TYPE_TO_MAX_BONDS = {
     dataset_pb2.BondTopology.AtomType.ATOM_H: 1
 }
 
+# Assumes that charged and neutral forms can be switched
+ATOM_TYPE_TO_MAX_BONDS_ANY_FORM = {
+    dataset_pb2.BondTopology.AtomType.ATOM_C: 4,
+    dataset_pb2.BondTopology.AtomType.ATOM_N: 4,
+    dataset_pb2.BondTopology.AtomType.ATOM_NPOS: 4,
+    dataset_pb2.BondTopology.AtomType.ATOM_O: 2,
+    dataset_pb2.BondTopology.AtomType.ATOM_ONEG: 2,
+    dataset_pb2.BondTopology.AtomType.ATOM_F: 1,
+    dataset_pb2.BondTopology.AtomType.ATOM_H: 1
+}
 # The value is a pair of an atomic symbol and formal charge
 ATOM_TYPE_TO_RDKIT = {
     dataset_pb2.BondTopology.AtomType.ATOM_C: ('C', 0),
@@ -73,6 +94,14 @@ ATOM_CHAR_TO_TYPE = {
     'f': dataset_pb2.BondTopology.AtomType.ATOM_F,
     'h': dataset_pb2.BondTopology.AtomType.ATOM_H,
 }
+ATOM_CHAR_TO_ATOMIC_NUMBER = {
+    'c': 6,
+    'n': 7,
+    'o': 8,
+    'f': 9,
+    'h': 1,
+}
+
 ATOM_TYPE_TO_ATOMIC_NUMBER = {
     dataset_pb2.BondTopology.AtomType.ATOM_C: 6,
     dataset_pb2.BondTopology.AtomType.ATOM_N: 7,
@@ -140,6 +169,16 @@ SPECIAL_ID_CASES = [
 
 # Conversion constant from Bohr to Angstroms
 BOHR_TO_ANGSTROMS = 0.529177249
+
+
+class StoichiometryError(Exception):
+
+  def __init__(self, stoich_str):
+    super().__init__()
+    self.stoich_str = stoich_str
+
+  def __str__(self):
+    return f'Could not parse "{self.stoich_str}" as valid stoichiometry for SMU'
 
 
 def special_case_bt_id_from_dat_id(dat_id, smiles):
@@ -240,7 +279,37 @@ _STOICHIOMETRY_WITH_HYDROGENS_COMPONENTS = [
 ]
 
 
-def get_canonical_stoichiometry_with_hydrogens(topology):
+def _expanded_stoichiometry_from_h_counts(heavy_atoms, hydrogen_counts):
+  """Returns expanded stoichiometry from H counts.
+
+  Args:
+    heavy_atoms: List of heavy atoms in a topology.
+    hydrogen_counts: Look up for hydrogen count per atom.
+
+  Returns:
+    Stoichiometry with hydrogen count as part of atom type.
+  """
+  components = collections.defaultdict(int)
+  for this_atom, h_count in zip(heavy_atoms, hydrogen_counts):
+    this_component = ATOM_TYPE_TO_CHAR[this_atom]
+    if h_count >= 1:
+      this_component += 'h'
+      if h_count > 1:
+        this_component += str(h_count)
+    components[this_component] += 1
+
+  out = ''
+  for got_component in _STOICHIOMETRY_WITH_HYDROGENS_COMPONENTS:
+    if got_component not in components:
+      continue
+    out += f'({got_component})'
+    if components[got_component] > 1:
+      out += str(components[got_component])
+
+  return out
+
+
+def expanded_stoichiometry_from_topology(topology):
   """Get stoichiometry where hydrogen count is part of the atom type.
 
   Each heavy atom is typed by the number of hydrogens it's connected to, e.g.
@@ -248,7 +317,7 @@ def get_canonical_stoichiometry_with_hydrogens(topology):
   * ch: carbon with one hydrogen
   * ch2: carbon with two hydrogens
 
-  Each atom type is then included in the output with it's count of how often it
+  Each atom type is then included in the output with its count of how often it
   occurs (just like a normal stoichiometry).
 
   Atom types are in order 'cnof' then by number of hydrogens
@@ -267,23 +336,123 @@ def get_canonical_stoichiometry_with_hydrogens(topology):
   """
   hydrogen_counts = compute_bonded_hydrogens(topology,
                                              compute_adjacency_matrix(topology))
-  components = collections.defaultdict(int)
-  for atom_idx, h_count in enumerate(hydrogen_counts):
-    this_component = ATOM_TYPE_TO_CHAR[topology.atoms[atom_idx]]
-    if h_count >= 1:
-      this_component += 'h'
-      if h_count > 1:
-        this_component += str(h_count)
-    components[this_component] += 1
+  return _expanded_stoichiometry_from_h_counts(topology.atoms, hydrogen_counts)
 
-  out = ''
-  for got_component in _STOICHIOMETRY_WITH_HYDROGENS_COMPONENTS:
-    if got_component not in components:
-      continue
-    out += f'({got_component})'
-    if components[got_component] > 1:
-      out += str(components[got_component])
 
+def _generate_hydrogen_assignments(heavy_atoms, total_h):
+  """Recursively generate hydrogen atom assignments.
+
+  Args:
+    heavy_atoms: List of dataset_pb2.BondTopology.AtomType.
+    total_h: int of total number of hydrogen atoms.
+
+  Yields:
+    List of hydrogen assignments.
+  """
+  # TODO(pfr): some error checking would be good
+  if len(heavy_atoms) == 1:
+    if total_h < ATOM_TYPE_TO_MAX_BONDS_ANY_FORM[heavy_atoms[0]]:
+      yield [total_h]
+    return
+  if total_h == 0:
+    yield [0] * len(heavy_atoms)
+    return
+  # It may look like this +1 is misplaced, but it's intentional.
+  # e.g. Carbon has a max of 4 bonds, so we want to try range(3), one less then
+  # the total, because, excpect for single atom special cases, one of the bonds
+  # must be to a non-hydrogen.
+  for num_for_first in range(
+      min(ATOM_TYPE_TO_MAX_BONDS_ANY_FORM[heavy_atoms[0]], total_h + 1)):
+    for other_assign in _generate_hydrogen_assignments(
+        heavy_atoms[1:],
+        total_h - num_for_first,
+    ):
+      yield [num_for_first] + other_assign
+
+
+def expanded_stoichiometries_from_atom_list(heavy_atoms, total_h):
+  """Get the list of possible expanded stoichiometries given atoms.
+
+  See expanded_stoichiometry_from_topology for documentation on the expanded
+  stoichiometry.
+
+  Args:
+    heavy_atoms: List of dataset_pb2.BondTopology.AtomType.
+    total_h: int of total number of hydrogens.
+
+  Returns:
+    Set of expanded stoichiometry strings.
+  """
+  out = set()
+  for assignment in _generate_hydrogen_assignments(heavy_atoms, total_h):
+    out.add(_expanded_stoichiometry_from_h_counts(heavy_atoms, assignment))
+  return out
+
+
+_EXPAND_STOICHIOMETRY_SPECIAL_CASES = {
+    'ch4': '(ch4)',
+    'h4c': '(ch4)',
+    'oh2': '(oh2)',
+    'h2o': '(oh2)',
+    'fh': '(fh)',
+    'hf': '(fh)',
+}
+
+
+def expanded_stoichiometries_from_stoichiometry(stoich_str):
+  """Generates a list possible expanded stoichiometries from a plain one.
+
+  Note that some expanded stoichiometries will be returned even if an invalid
+  number of hydrogens is given.
+  For example "CN" generates (c)(n) and "CNH2" generates (ch2)(n)
+  Further, even for some valid stoichiometries, expanded stoichiometries will be
+  enerated that cannot correspond to a SMU molecule.
+  For example "C2H2" will generate "(c)(ch2)"
+
+  Args:
+    stoich_str: string of a stoichiometry like "C6OH4" (case does not matter)
+
+  Returns:
+    set of strings
+
+  Raises:
+    StoichiometryError: If there are too many hydrogens or an unrecognized atom.
+  """
+  stoich_str = stoich_str.lower()
+  if stoich_str in _EXPAND_STOICHIOMETRY_SPECIAL_CASES:
+    out = set()
+    out.add(_EXPAND_STOICHIOMETRY_SPECIAL_CASES[stoich_str])
+    return out
+
+  heavy_atoms = []
+  total_h = 0
+
+  parse_idx = 0
+  while parse_idx < len(stoich_str):
+    try:
+      atom_type = ATOM_CHAR_TO_TYPE[stoich_str[parse_idx]]
+    except KeyError as key_error:
+      raise StoichiometryError(stoich_str) from key_error
+
+    num_digits = 0
+    while (parse_idx + num_digits + 1 < len(stoich_str) and
+           stoich_str[parse_idx + num_digits + 1].isdigit()):
+      num_digits += 1
+    if num_digits == 0:
+      atom_count = 1
+    else:
+      atom_count = int(stoich_str[parse_idx + 1:parse_idx + num_digits + 1])
+
+    if atom_type == dataset_pb2.BondTopology.AtomType.ATOM_H:
+      total_h = atom_count
+    else:
+      heavy_atoms.extend([atom_type] * atom_count)
+
+    parse_idx += 1 + num_digits
+
+  out = expanded_stoichiometries_from_atom_list(heavy_atoms, total_h)
+  if not out:
+    raise StoichiometryError(stoich_str)
   return out
 
 
@@ -305,13 +474,19 @@ def compute_adjacency_matrix(topology):
   ])
   adjacency_matrix = [[0] * side_length for _ in range(side_length)]
   for bond in topology.bonds:
-    if topology.atoms[bond.atom_b] != dataset_pb2.BondTopology.AtomType.ATOM_H:
-      if bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_SINGLE:
-        adjacency_matrix[bond.atom_a][bond.atom_b] = 1
-      elif bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_DOUBLE:
-        adjacency_matrix[bond.atom_a][bond.atom_b] = 2
-      elif bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_TRIPLE:
-        adjacency_matrix[bond.atom_a][bond.atom_b] = 3
+    if topology.atoms[bond.atom_a] == dataset_pb2.BondTopology.AtomType.ATOM_H:
+      continue
+    if topology.atoms[bond.atom_b] == dataset_pb2.BondTopology.AtomType.ATOM_H:
+      continue
+    if bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_SINGLE:
+      adjacency_matrix[bond.atom_a][bond.atom_b] = 1
+      adjacency_matrix[bond.atom_b][bond.atom_a] = 1
+    elif bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_DOUBLE:
+      adjacency_matrix[bond.atom_a][bond.atom_b] = 2
+      adjacency_matrix[bond.atom_b][bond.atom_a] = 2
+    elif bond.bond_type == dataset_pb2.BondTopology.BondType.BOND_TRIPLE:
+      adjacency_matrix[bond.atom_a][bond.atom_b] = 3
+      adjacency_matrix[bond.atom_b][bond.atom_a] = 3
   return adjacency_matrix
 
 
@@ -392,8 +567,8 @@ def create_bond_topology(atoms, connectivity_matrix_string, hydrogens_string):
       continue
     try:
       bond_topology.atoms.append(ATOM_CHAR_TO_TYPE[atom_type])
-    except KeyError:
-      raise ValueError('Unknown atom type: {}'.format(atom_type))
+    except KeyError as key_error:
+      raise ValueError('Unknown atom type: {}'.format(atom_type)) from key_error
 
   num_heavy_atoms = len(bond_topology.atoms)
 
@@ -434,7 +609,7 @@ def create_bond_topology(atoms, connectivity_matrix_string, hydrogens_string):
     elif diff:
       raise ValueError(
           f'Bad hydrogen count (actual={actual_h}, expected={expected_h} '
-          'for {atom_type}, index {atom_idx}')
+          f'for {atom_type}, index {atom_idx}')
     for _ in range(actual_h):
       bond_topology.atoms.append(dataset_pb2.BondTopology.AtomType.ATOM_H)
       h_idx = len(bond_topology.atoms) - 1
@@ -471,72 +646,28 @@ def parse_bond_topology_line(line):
           line[connectivity_end + 2:connectivity_end + 2 + num_atoms])
 
 
-def generate_bond_topologies_from_csv(filename):
+def generate_bond_topologies_from_csv(fileobj):
   """Generator for bond topologies stored in a csv.
 
   See merge_bond_topologies.py for the expected format.
 
   Args:
-    filename: input csv
+    fileobj: file like object
 
   Yields:
     BondTopology
   """
-  with gfile.GFile(filename, 'r') as infile:
-    reader = csv.reader(iter(infile))
-    next(reader)  # skip the header line
-    for row in reader:
-      bt_id, _, atoms, connectivity, hydrogens, smiles = row
-      # The atoms strings looks like 'C N N+O O-' where every atom has a space,
-      # +, or - after it. create_bond_topology doesn't want the charge markings
-      # (just a string like 'CNNOO') so the [::2] skips those.
-      bond_topology = create_bond_topology(atoms[::2], connectivity, hydrogens)
-      bond_topology.smiles = smiles
-      bond_topology.bond_topology_id = int(bt_id)
-      yield bond_topology
-
-
-def parse_duplicates_file(filename):
-  """Parses duplciate file into a pandas dataframe.
-
-  The duplciate file supplied by our collaborators (called
-  list.equivalent_{isomers,conformers.dat) is a two column, space separated
-  file of composite names like x07_n4o3h4.091404.073
-  which we parse the names into columns
-  * nameX: original composiite name from file
-  * stoichX: string for the stoichiometry
-  * btidX: bond topology id
-  * shortconfidX: 3 digit conformer id
-  * confidX: full conformer id that we use (btid * 1000 + shortconfid)
-  (for X = 1 or 2)
-
-  Args:
-    filename: file to read (usually list.equivalent_isomers.dat)
-
-  Returns:
-    pd.DataFrame
-  """
-  with gfile.GFile(filename) as f:
-    df_dups = pd.read_csv(
-        f, delim_whitespace=True, names=['name1', 'name2'], header=None)
-
-  for idx in ['1', '2']:
-    df_dups = pd.concat([
-        df_dups,
-        df_dups['name' +
-                idx].str.extract(r'x07_([\w\d]+)\.(\d+).(\d+)').rename(columns={
-                    0: 'stoich' + idx,
-                    1: 'btid' + idx,
-                    2: 'shortconfid' + idx
-                })
-    ],
-                        axis=1)
-    df_dups['btid' + idx] = df_dups['btid' + idx].astype(int)
-    df_dups['shortconfid' + idx] = df_dups['shortconfid' + idx].astype(int)
-    df_dups['confid' + idx] = (
-        df_dups['btid' + idx] * 1000 + df_dups['shortconfid' + idx])
-
-  return df_dups
+  reader = csv.reader(iter(fileobj))
+  next(reader)  # skip the header line
+  for row in reader:
+    bt_id, _, atoms, connectivity, hydrogens, smiles = row
+    # The atoms strings looks like 'C N N+O O-' where every atom has a space,
+    # +, or - after it. create_bond_topology doesn't want the charge markings
+    # (just a string like 'CNNOO') so the [::2] skips those.
+    bond_topology = create_bond_topology(atoms[::2], connectivity, hydrogens)
+    bond_topology.smiles = smiles
+    bond_topology.bond_topology_id = int(bt_id)
+    yield bond_topology
 
 
 def bond_topology_to_molecule(bond_topology):
@@ -561,6 +692,24 @@ def bond_topology_to_molecule(bond_topology):
                 BOND_TYPE_TO_RDKIT[pb_bond.bond_type])
 
   return mol
+
+
+def get_bond_type(bond_topology, atom_idx0, atom_idx1):
+  """Returns the type of bond in the topology.
+
+  Args:
+    bond_topology: datset_pb2.BondTopology
+    atom_idx0: int, atom index
+    atom_idx1: int atom index
+
+  Returns:
+    dataset_pb2.BondTopology.BondType
+  """
+  for bond in bond_topology.bonds:
+    if ((bond.atom_a == atom_idx0 and bond.atom_b == atom_idx1) or
+        (bond.atom_a == atom_idx1 and bond.atom_b == atom_idx0)):
+      return bond.bond_type
+  return dataset_pb2.BondTopology.BondType.BOND_UNDEFINED
 
 
 def conformer_to_molecules(conformer,
@@ -599,9 +748,8 @@ def conformer_to_molecules(conformer,
     bts = conformer.bond_topologies
   else:
     bts = conformer.bond_topologies[0:1]
-  requested_bond_topologies = [
-      (bt, f'{bt.bond_topology_id}({i}/{bt_count})') for i, bt in enumerate(bts)
-  ]
+  requested_bond_topologies = [(bt, f'{bt.bond_topology_id}({i}/{bt_count})')
+                               for i, bt in enumerate(bts, start=1)]
 
   # requested_geometries will be a list of tuples of
   # (goemetry, label)
@@ -611,7 +759,7 @@ def conformer_to_molecules(conformer,
     init_count = len(conformer.initial_geometries)
     requested_geometries.extend([
         (geom, f'init({i}/{init_count})')
-        for i, geom in enumerate(conformer.initial_geometries)
+        for i, geom in enumerate(conformer.initial_geometries, start=1)
     ])
   if include_optimized_geometry:
     requested_geometries.append((conformer.optimized_geometry, 'opt'))
@@ -622,7 +770,8 @@ def conformer_to_molecules(conformer,
       mol = bond_topology_to_molecule(bt)
       mol.SetProp(
           '_Name',
-          f'SMU {conformer.conformer_id} bt={bt_label} geom={geom_label}')
+          f'SMU {conformer.conformer_id} bt={bt_label} geom={geom_label} fate={conformer.fate}'
+      )
 
       # Add in the coordinates
       conf = Chem.Conformer(len(bt.atoms))
@@ -662,7 +811,7 @@ def compute_smiles_for_bond_topology(bond_topology,
       labeled_atoms=labeled_atoms)
 
 
-def compute_smiles_for_molecule(mol, include_hs, labeled_atoms = False):
+def compute_smiles_for_molecule(mol, include_hs, labeled_atoms=False):
   """Calculate a canonical smiles for the given RDKit Molecule.
 
   Note that you probably should NOT have sanitized your RDKit molecule. The
@@ -773,20 +922,16 @@ def _conformer_source(conf):
 # conformer.
 MERGE_CONFLICT_FIELDS = [
     'conformer_id',
-    'error_nstat1_1',
-    'error_nstatc_1',
-    'error_nstatt_1',
-    'error_frequencies_1',
+    'error_nstat1',
+    'error_nstatc',
+    'error_nstatv',
+    'error_nstatt',
     'initial_geometry_energy_1',
     'initial_geometry_gradient_norm_1',
     'optimized_geometry_energy_1',
     'optimized_geometry_gradient_norm_1',
     'has_initial_geometry_1',
     'has_optimized_geometry_1',
-    'error_nstat1_2',
-    'error_nstatc_2',
-    'error_nstatt_2',
-    'error_frequencies_2',
     'initial_geometry_energy_2',
     'initial_geometry_gradient_norm_2',
     'optimized_geometry_energy_2',
@@ -874,10 +1019,23 @@ def merge_conformer(conf1, conf2):
               conf1.bond_topologies[0].bond_topology_id,
               conf2.bond_topologies[0].bond_topology_id))
 
-  # All the remaining cases are just moving duplicate information from
-  # source1 to source2. The only non trivial version of this is merging
-  # STAGE1 into STAGE2. In some cases, the value will differ and we want to
-  # note that here.
+  # We set the conflict info here because we'll be messing around with fields
+  # below. We may not need this if we don't actually find a conflict.
+  conflict_info = [conf1.conformer_id]
+  conflict_info.append(conf1.properties.errors.error_nstat1)
+  conflict_info.append(conf1.properties.errors.error_nstatc)
+  conflict_info.append(conf1.properties.errors.error_frequencies)  # nstatv
+  conflict_info.append(conf1.properties.errors.error_nstatt)
+  for c in [conf1, conf2]:
+    conflict_info.append(c.properties.initial_geometry_energy.value)
+    conflict_info.append(c.properties.initial_geometry_gradient_norm.value)
+    conflict_info.append(c.properties.optimized_geometry_energy.value)
+    conflict_info.append(c.properties.optimized_geometry_gradient_norm.value)
+    conflict_info.append(bool(c.initial_geometries))
+    conflict_info.append(c.HasField('optimized_geometry'))
+
+  # The stage1 (in source1) and stage2 (in source2) is the only non-trivial
+  # merge. We look for conflicts between them and then a few special cases.
   has_conflict = False
   if source1 == _ConformerSource.STAGE1 and source2 == _ConformerSource.STAGE2:
     if len(conf1.bond_topologies) != 1 or len(conf2.bond_topologies) != 1:
@@ -911,6 +1069,45 @@ def merge_conformer(conf1, conf2):
         if not np.isclose(val1, val2, atol=atol, rtol=0):
           has_conflict = True
 
+    # This isn't actually a conflict per-se, but we want to find anything that
+    # is not an allowed set of combinations of error values.
+    error_codes = (conf1.properties.errors.error_nstat1,
+                   conf1.properties.errors.error_nstatc,
+                   conf1.properties.errors.error_frequencies,
+                   conf1.properties.errors.error_nstatt)
+    if conf1.properties.errors.error_frequencies == 101:
+      # This happens for exactly one molecule. If anything else shows up
+      # here we will mark it as a conflict so it comes out in that output
+      if conf2.conformer_id != 795795001:
+        has_conflict = True
+    elif error_codes not in [(1, 1, 1, 1), (3, 1, 1, 1), (2, 3, 2, 1),
+                             (5, 1, 3, 1), (1, 1, 101, 1)]:
+      has_conflict = True
+
+    # After all of that, we always take the stage1 initial energy,
+    # gradient norm, and positions.
+    conf2.properties.initial_geometry_energy.value = (
+        conf1.properties.initial_geometry_energy.value)
+    conf2.properties.initial_geometry_gradient_norm.value = (
+        conf1.properties.initial_geometry_gradient_norm.value)
+    conf2.initial_geometries[0].CopyFrom(conf1.initial_geometries[0])
+
+    # The 800 and 700 are special cases where we want to take the stage1 data
+    if (conf2.properties.errors.status == 800 or
+        conf2.properties.errors.status == 700):
+      # Flip back because we will base everything on the stage1 file
+      conf1, conf2 = conf2, conf1
+      source1, source2 = source2, source1
+
+      conf2.properties.errors.status = (500 +
+                                        conf1.properties.errors.status // 10)
+      conf2.which_database = dataset_pb2.COMPLETE
+      if np.any(np.asarray(conf2.properties.harmonic_frequencies.value) < -30):
+        conf2.properties.errors.warn_vib_imaginary = 2
+      elif np.any(np.asarray(conf2.properties.harmonic_frequencies.value) < 0):
+        conf2.properties.errors.warn_vib_imaginary = 1
+
+  # Move over all duplicate info.
   if (conf1.duplicated_by != 0 and conf2.duplicated_by != 0 and
       conf1.duplicated_by != conf2.duplicated_by):
     raise ValueError('Incompatible duplicated_by {} {}'.format(
@@ -921,19 +1118,6 @@ def merge_conformer(conf1, conf2):
 
   if not has_conflict:
     return conf2, None
-
-  conflict_info = [conf1.conformer_id]
-  for c in [conf1, conf2]:
-    conflict_info.append(c.properties.errors.error_nstat1)
-    conflict_info.append(c.properties.errors.error_nstatc)
-    conflict_info.append(c.properties.errors.error_nstatt)
-    conflict_info.append(c.properties.errors.error_frequencies)
-    conflict_info.append(c.properties.initial_geometry_energy.value)
-    conflict_info.append(c.properties.initial_geometry_gradient_norm.value)
-    conflict_info.append(c.properties.optimized_geometry_energy.value)
-    conflict_info.append(c.properties.optimized_geometry_gradient_norm.value)
-    conflict_info.append(bool(c.initial_geometries))
-    conflict_info.append(c.HasField('optimized_geometry'))
 
   return conf2, conflict_info
 
@@ -977,9 +1161,9 @@ def conformer_calculation_error_level(conformer):
     return 3
 
   # This is warning level 'C' from Bazel documentation.
-  if (errors.warn_t1 > 2 or errors.warn_t1_excess > 2 or
-      errors.warn_bse_b5_b6 > 2 or errors.warn_bse_cccsd_b5 > 2 or
-      errors.warn_exc_lowest_excitation > 2 or
+  if (errors.warn_t1 > 1 or errors.warn_t1_excess > 1 or
+      errors.warn_bse_b5_b6 > 1 or errors.warn_bse_cccsd_b5 > 1 or
+      errors.warn_exc_lowest_excitation > 1 or
       errors.warn_exc_smallest_oscillator > 0 or
       errors.warn_exc_largest_oscillator > 0):
     return 2
@@ -1019,11 +1203,18 @@ def should_include_in_standard(conformer):
   Returns:
     boolean
   """
-  if conformer_calculation_error_level(conformer) > 0:
-    return False
   if conformer.duplicated_by > 0:
     return False
-  return True
+  if conformer.which_database == dataset_pb2.COMPLETE:
+    return False
+  elif conformer.which_database == dataset_pb2.STANDARD:
+    return True
+  else:
+    # This should only happen with stage1 only files.
+    if conformer_calculation_error_level(conformer) > 0:
+      return False
+    else:
+      return True
 
 
 def conformer_to_standard(conformer):
@@ -1050,6 +1241,213 @@ def conformer_to_standard(conformer):
   return conformer
 
 
+def clean_up_error_codes(conformer):
+  """Cleans up error codes for the final dataset.
+
+  Two major types of thigns need to be changed.
+  * For stage1 only conformers, the new status code needs to be set
+  * For stage2 conformers, the old style error codes need to be cleared.
+
+  Modifies the input conformer
+
+  Args:
+    conformer: dataset_pb2.Conformer
+  """
+  source = _conformer_source(conformer)
+  if source == _ConformerSource.STAGE1:
+    if conformer.properties.errors.status:
+      # This is a special case where the stage1 conformer was already put
+      # together as a final entry during the merging process. Everything
+      # has already been set up.
+      pass
+    elif (conformer.properties.errors.error_nstat1 == 1 or
+          conformer.properties.errors.error_nstat1 == 3):
+      # This should be a duplciate. If we have no record of a dup, we'll
+      # leaves is as stauts 0 and let it be caught by fate below
+      if conformer.duplicated_by:
+        conformer.properties.errors.status = -1
+    elif conformer.properties.errors.error_nstat1 == 5:
+      # optimization was successful, but optimized to different topology
+      conformer.properties.errors.status = 590
+    elif conformer.properties.errors.error_nstat1 == 2:
+      # optimization failed. Clean up the error codes and remove some info
+      conformer.properties.errors.status = 600
+      conformer.properties.ClearField('initial_geometry_energy')
+      conformer.properties.ClearField('initial_geometry_gradient_norm')
+      conformer.properties.ClearField('optimized_geometry_energy')
+      conformer.properties.ClearField('optimized_geometry_gradient_norm')
+      conformer.ClearField('optimized_geometry')
+
+    # If something isn't caught there, we'll let it go through with
+    # status still unset. This will be categorized later in determine_fate
+  elif source == _ConformerSource.STAGE2:
+    pass
+  else:
+    raise ValueError(
+        f'Clean up can only handle Stage1 or 2 conformers, got {conformer}')
+
+  for field in STAGE1_ERROR_FIELDS:
+    conformer.properties.errors.ClearField(field)
+
+
+_SENTINEL_VALUE_FIELDS = [
+    'initial_geometry_energy',
+    'initial_geometry_gradient_norm',
+    'optimized_geometry_energy',
+    'optimized_geometry_gradient_norm',
+]
+
+
+def clean_up_sentinel_values(conformer):
+  """Removes some snetinel values, relying on empty protobuf fields to indicate absence.
+
+  Modifies the conformer
+
+  Args:
+    conformer: dataset_pb2.Conformer
+  """
+  for field in _SENTINEL_VALUE_FIELDS:
+    if getattr(conformer.properties, field).value == -1.0:
+      conformer.properties.ClearField(field)
+
+
+_ZERO_FIELD_CHECK_SCALAR = [
+    'single_point_energy_atomic_b5',
+    'single_point_energy_atomic_b6',
+    'single_point_energy_b3lyp_6_31ppgdp',
+    'single_point_energy_b3lyp_aug_pcs_1',
+    'single_point_energy_cc2_tzvp',
+    'single_point_energy_ccsd_2sd',
+    'single_point_energy_ccsd_2sp',
+    'single_point_energy_ccsd_3psd',
+    'single_point_energy_ccsd_t_2sd',
+    'single_point_energy_ccsd_t_2sp',
+    'single_point_energy_eccsd',
+    'single_point_energy_hf_2sd',
+    'single_point_energy_hf_2sp',
+    'single_point_energy_hf_3',
+    'single_point_energy_hf_34',
+    'single_point_energy_hf_3psd',
+    'single_point_energy_hf_4',
+    'single_point_energy_hf_6_31gd',
+    'single_point_energy_hf_cvtz',
+    'single_point_energy_hf_tzvp',
+    'single_point_energy_mp2_2sd',
+    'single_point_energy_mp2_2sp',
+    'single_point_energy_mp2_3',
+    'single_point_energy_mp2_34',
+    'single_point_energy_mp2_3psd',
+    'single_point_energy_mp2_4',
+    'single_point_energy_mp2_tzvp',
+    'single_point_energy_mp2ful_cvtz',
+    'single_point_energy_pbe0_6_311gd',
+    'single_point_energy_pbe0_6_311gd_cat',
+    'single_point_energy_pbe0_6_311gd_cat_mrcc',
+    'single_point_energy_pbe0_6_311gd_cat_orca',
+    'single_point_energy_pbe0_6_311gd_mrcc',
+    'single_point_energy_pbe0_6_311gd_orca',
+    'single_point_energy_pbe0_6_31ppgdp',
+    'single_point_energy_pbe0_aug_pc_1',
+    'single_point_energy_pbe0_aug_pcs_1',
+    'single_point_energy_pbe0d3_6_311gd',
+    'homo_b3lyp_6_31ppgdp',
+    'homo_b3lyp_aug_pcs_1',
+    'homo_hf_3',
+    'homo_hf_4',
+    'homo_hf_6_31gd',
+    'homo_hf_cvtz',
+    'homo_hf_tzvp',
+    'homo_pbe0_6_311gd',
+    'homo_pbe0_6_31ppgdp',
+    'homo_pbe0_aug_pc_1',
+    'homo_pbe0_aug_pcs_1',
+    'lumo_b3lyp_6_31ppgdp',
+    'lumo_b3lyp_aug_pcs_1',
+    'lumo_hf_3',
+    'lumo_hf_4',
+    'lumo_hf_6_31gd',
+    'lumo_hf_cvtz',
+    'lumo_hf_tzvp',
+    'lumo_pbe0_6_311gd',
+    'lumo_pbe0_6_31ppgdp',
+    'lumo_pbe0_aug_pc_1',
+    'lumo_pbe0_aug_pcs_1',
+    'atomization_energy_excluding_zpe_atomic_b5',
+    'atomization_energy_excluding_zpe_atomic_b5_um',
+    'atomization_energy_excluding_zpe_atomic_b6',
+    'atomization_energy_excluding_zpe_atomic_b6_um',
+    'atomization_energy_excluding_zpe_eccsd',
+    'atomization_energy_excluding_zpe_eccsd_um',
+    'atomization_energy_including_zpe_atomic_b5',
+    'atomization_energy_including_zpe_atomic_b5_um',
+    'atomization_energy_including_zpe_atomic_b6',
+    'atomization_energy_including_zpe_atomic_b6_um',
+    'atomization_energy_including_zpe_eccsd',
+    'atomization_energy_including_zpe_eccsd_um',
+    'enthalpy_of_formation_0k_atomic_b5',
+    'enthalpy_of_formation_0k_atomic_b5_um',
+    'enthalpy_of_formation_0k_atomic_b6',
+    'enthalpy_of_formation_0k_atomic_b6_um',
+    'enthalpy_of_formation_0k_eccsd',
+    'enthalpy_of_formation_0k_eccsd_um',
+    'enthalpy_of_formation_298k_atomic_b5',
+    'enthalpy_of_formation_298k_atomic_b5_um',
+    'enthalpy_of_formation_298k_atomic_b6',
+    'enthalpy_of_formation_298k_atomic_b6_um',
+    'enthalpy_of_formation_298k_eccsd',
+    'enthalpy_of_formation_298k_eccsd_um',
+]
+
+_ZERO_FIELD_CHECK_ATOMIC = [
+    'nmr_isotropic_shielding_b3lyp_6_31ppgdp',
+    'nmr_isotropic_shielding_b3lyp_aug_pcs_1',
+    'nmr_isotropic_shielding_pbe0_6_31ppgdp',
+    'nmr_isotropic_shielding_pbe0_aug_pcs_1',
+    'partial_charges_esp_fit_hf_6_31gd',
+    'partial_charges_esp_fit_pbe0_aug_pc_1',
+    'partial_charges_loewdin_hf_6_31gd',
+    'partial_charges_loewdin_pbe0_aug_pc_1',
+    'partial_charges_mulliken_hf_6_31gd',
+    'partial_charges_mulliken_pbe0_aug_pc_1',
+    'partial_charges_natural_nbo_hf_6_31gd',
+    'partial_charges_natural_nbo_pbe0_aug_pc_1',
+    'partial_charges_paboon_hf_6_31gd',
+    'partial_charges_paboon_pbe0_aug_pc_1',
+]
+
+
+def find_zero_values(conformer):
+  """Finds fields whose values are exactly 0.
+
+  Fields that are exactly zero are likely to be problematic in some way so we
+  look for
+  a handful of these.
+
+  Args:
+    conformer: dataset_pb2.Conformer
+
+  Yields:
+    string of field name
+  """
+  properties = conformer.properties
+
+  # excitation is different because it's a MultiScalar
+  if properties.HasField('excitation_energies_cc2'):
+    for value in properties.excitation_energies_cc2.value:
+      if value == 0.0:
+        yield 'excitation_energies_cc2'
+
+  for field in _ZERO_FIELD_CHECK_SCALAR:
+    if properties.HasField(field) and getattr(properties, field).value == 0.0:
+      yield field
+
+  for field in _ZERO_FIELD_CHECK_ATOMIC:
+    if properties.HasField(field):
+      for value in getattr(properties, field).values:
+        if value == 0.0:
+          yield field
+
+
 def determine_fate(conformer):
   """Determines the cateogrical FateCategory for conformer.
 
@@ -1074,16 +1472,12 @@ def determine_fate(conformer):
       else:
         return dataset_pb2.Conformer.FATE_DUPLICATE_DIFFERENT_TOPOLOGY
 
-    error_code = conformer.properties.errors.error_nstat1
-    # These error codes looks like random numbers. They are the particular
-    # code generated by the Fortran code.
-    if error_code == 2:
+    status = conformer.properties.errors.status
+    if status == 600:
       return dataset_pb2.Conformer.FATE_GEOMETRY_OPTIMIZATION_PROBLEM
-    elif error_code == 5:
+    elif status == 590:
       return dataset_pb2.Conformer.FATE_DISASSOCIATED
-    elif error_code == 4:
-      return dataset_pb2.Conformer.FATE_FORCE_CONSTANT_FAILURE
-    elif error_code > 1:
+    elif status == 570 or status == 580:
       return dataset_pb2.Conformer.FATE_DISCARDED_OTHER
     else:
       # This means that we can find no reason this shouldn't have gone on to
@@ -1111,6 +1505,31 @@ def determine_fate(conformer):
     raise ValueError(f'Got an unknown source {source}')
 
 
+def get_starting_bond_topology_index(conformer):
+  """Gets the index of the bond topology which generated this calculation.
+
+  If there is only a single geometry, it's that one.
+  Otherwise, one of the geometries should be marked with is_starting_topology
+
+  Args:
+    conformer: dataset_pb2.Conformer
+
+  Returns:
+    integer
+
+  Raises:
+    ValueError: if no starting topology can be found
+  """
+  if len(conformer.bond_topologies) == 1:
+    return 0
+  for i in range(len(conformer.bond_topologies)):
+    if conformer.bond_topologies[i].is_starting_topology:
+      return i
+
+  raise ValueError(
+      f'For conformer {conformer.conformer_id}, no starting topology')
+
+
 def conformer_to_bond_topology_summaries(conformer):
   """Produces BondTopologySummary protos from Conformer.
 
@@ -1124,12 +1543,31 @@ def conformer_to_bond_topology_summaries(conformer):
     dataset_pb2.BondTopologySummary
   """
   summary = dataset_pb2.BondTopologySummary()
-  if (conformer.conformer_id // 1000 !=
-      conformer.bond_topologies[0].bond_topology_id):
-    raise ValueError('conformers_to_bond_topology_summaries assumes the '
-                     'first bond topology is the one that generated this.')
-  summary.bond_topology.CopyFrom(conformer.bond_topologies[0])
-  summary.count_attempted_conformers = 1
+  try:
+    starting_idx = get_starting_bond_topology_index(conformer)
+    summary.bond_topology.CopyFrom(conformer.bond_topologies[starting_idx])
+    summary.count_attempted_conformers = 1
+  except ValueError:
+    starting_idx = None
+    # In this case, we won't yield the summary at all so we don't set anything
+    # about it.
+
+  def other_topologies():
+    if starting_idx is None:
+      yield from conformer.bond_topologies
+    else:
+      yield from itertools.chain(conformer.bond_topologies[:starting_idx],
+                                 conformer.bond_topologies[(starting_idx + 1):])
+
+  def filtered_other_topologies():
+    observed_bt_id = set()
+    if starting_idx is not None:
+      observed_bt_id.add(
+          conformer.bond_topologies[starting_idx].bond_topology_id)
+    for bt in other_topologies():
+      if bt.bond_topology_id not in observed_bt_id:
+        yield bt
+        observed_bt_id.add(bt.bond_topology_id)
 
   fate = conformer.fate
 
@@ -1147,23 +1585,30 @@ def conformer_to_bond_topology_summaries(conformer):
   elif fate == dataset_pb2.Conformer.FATE_NO_CALCULATION_RESULTS:
     summary.count_kept_geometry = 1
     summary.count_missing_calculation = 1
-  elif (
-      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_SERIOUS_ERROR or
-      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_MAJOR_ERROR or
-      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_MODERATE_ERROR or
-      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_WARNING_SERIOUS or
-      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_WARNING_VIBRATIONAL):
+  elif (fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_SERIOUS_ERROR or
+        fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_MAJOR_ERROR or
+        fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_MODERATE_ERROR):
     summary.count_kept_geometry = 1
     summary.count_calculation_with_error = 1
-    for bt in conformer.bond_topologies[1:]:
+    for bt in filtered_other_topologies():
       other_summary = dataset_pb2.BondTopologySummary()
       other_summary.bond_topology.CopyFrom(bt)
       other_summary.count_detected_match_with_error = 1
       yield other_summary
+  elif (
+      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_WARNING_SERIOUS or
+      fate == dataset_pb2.Conformer.FATE_CALCULATION_WITH_WARNING_VIBRATIONAL):
+    summary.count_kept_geometry = 1
+    summary.count_calculation_with_warning = 1
+    for bt in filtered_other_topologies():
+      other_summary = dataset_pb2.BondTopologySummary()
+      other_summary.bond_topology.CopyFrom(bt)
+      other_summary.count_detected_match_with_warning = 1
+      yield other_summary
   elif fate == dataset_pb2.Conformer.FATE_SUCCESS:
     summary.count_kept_geometry = 1
     summary.count_calculation_success = 1
-    for bt in conformer.bond_topologies[1:]:
+    for bt in filtered_other_topologies():
       other_summary = dataset_pb2.BondTopologySummary()
       other_summary.bond_topology.CopyFrom(bt)
       other_summary.count_detected_match_success = 1
@@ -1171,4 +1616,36 @@ def conformer_to_bond_topology_summaries(conformer):
   else:
     raise ValueError(f'Did not understand {fate}')
 
-  yield summary
+  if starting_idx is not None:
+    yield summary
+
+  # Now emit our multiple detection records
+  observed_bt_id = set()
+  yielded_multi_detect = set()
+  for bt in conformer.bond_topologies:
+    if bt.bond_topology_id not in observed_bt_id:
+      observed_bt_id.add(bt.bond_topology_id)
+      continue
+    if bt.bond_topology_id not in yielded_multi_detect:
+      other_summary = dataset_pb2.BondTopologySummary()
+      other_summary.bond_topology.CopyFrom(bt)
+      other_summary.count_multiple_detections = 1
+      yield other_summary
+      yielded_multi_detect.add(bt.bond_topology_id)
+
+
+def conformer_eligible_for_topology_detection(conformer):
+  """Returns whether this conformer is worthy of topology detection.
+
+  Simple duplicate marking or conformers with unreliable geometries are not
+  generally useful to do topology detection.
+
+  Args:
+    conformer: dataset_pb2.Conformer
+
+  Returns:
+    bool
+  """
+  return (conformer.duplicated_by == 0 and
+          conformer.properties.errors.status >= 0 and
+          conformer.properties.errors.status < 512)

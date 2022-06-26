@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
 
 r"""Trains a keras model on a tf.Dataset.
 
-Instructions
+Instructions.
 
-python3 -m main -- \
+python3 -m dedal.main -- \
 --base_dir /tmp/example/1/ \
 --gin_config dedal.gin \
 --task train \
@@ -46,9 +46,8 @@ flags.DEFINE_multi_string(
     'gin_config', [], 'List of paths to the config files.')
 flags.DEFINE_multi_string(
     'gin_bindings', [], 'Newline separated list of Gin parameter bindings.')
-flags.DEFINE_string('config_path',
-                    'third_party/google_research/google_research/dedal/configs',
-                    'Where to find the gin configurations.')
+flags.DEFINE_string(
+    'config_path', 'dedal/configs', 'Where to find the gin configurations.')
 FLAGS = flags.FLAGS
 
 

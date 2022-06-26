@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -133,7 +133,7 @@ def train_and_evaluate(config, workdir):
 
   solver, solver_param_name = get_solver(
       FLAGS, config, loss_fun, losses=loss_fun)  # losses is not defined yet!
-  params, state = solver.init(params)
+  params, state = solver.init(params)  # pytype: disable=attribute-error
 
   ## Path to dump results
   dumpath = create_dumpfile(config, solver_param_name, workdir, "cifar10")

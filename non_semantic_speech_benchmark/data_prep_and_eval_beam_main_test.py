@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,7 +48,7 @@ def _none(*args, **kwargs):
 
 def _train_and_get_score(*args, **kwargs):
   del args, kwargs
-  return (0.0, 0.0)
+  return {'metric_name': (0.0, 0.0)}
 
 
 class DataPrepAndEvalBeamMainTest(parameterized.TestCase):

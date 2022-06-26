@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ class SbmSimulatorTestSbm(absltest.TestCase):
     sbm_simulator.SimulateSbm(
         self.simulation_with_graph,
         num_vertices=50,
-        num_edges=500,
+        num_edges=500.0,
         pi=[0.5, 0.5],
         prop_mat=np.ones(shape=(2, 2)))
 
@@ -45,11 +45,11 @@ class SbmSimulatorTestSbm(absltest.TestCase):
 
   def test_simulate_sbm_community_sizes(self):
     simulation = sbm_simulator.StochasticBlockModel()
-    unbalanced_pi = np.array([x + 1 for x in range(10)]) / 55
+    unbalanced_pi = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     sbm_simulator.SimulateSbm(
         simulation,
         num_vertices=50,
-        num_edges=100,
+        num_edges=100.0,
         pi=unbalanced_pi,
         prop_mat=np.ones(shape=(10, 10)))
     expected_sizes = [1, 2, 3, 4, 5, 5, 6, 7, 8, 9]
@@ -74,7 +74,7 @@ class SbmSimulatorTestSbm(absltest.TestCase):
     sbm_simulator.SimulateSbm(
         simulation,
         num_vertices=500,
-        num_edges=10000,
+        num_edges=10000.0,
         pi=pi,
         prop_mat=np.ones(shape=(num_communities, num_communities)))
     expected_sizes = [29, 43, 58, 71, 85, 100, 114]
@@ -153,11 +153,10 @@ class SbmSimulatorTestHeterogeneousSbm(absltest.TestCase):
     self.simulation_with_graph = sbm_simulator.StochasticBlockModel()
     prop_mat = hsu.GetPropMat(2, 5.0, 2, 5.0, 5.0)
     sbm_simulator.SimulateSbm(self.simulation_with_graph,
-                              num_vertices=200,
-                              num_edges=16000,
+                              num_vertices=400,
+                              num_edges=16000.0,
                               pi=np.array([0.5, 0.5]),
                               prop_mat=prop_mat,
-                              num_vertices2=200,
                               pi2=np.array([0.5, 0.5]))
     sbm_simulator.SimulateFeatures(self.simulation_with_graph,
                                    center_var=1.0,

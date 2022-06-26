@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -176,7 +176,7 @@ def train_and_evaluate(config, workdir):
   rng, init_rng = jax.random.split(rng)
 
   init_params = CNN().init(init_rng, jnp.ones([1, 28, 28, 1]))["params"]
-  params, state = solver.init(init_params)
+  params, state = solver.init(init_params)  # pytype: disable=attribute-error
 
   # Full path to dump resultss
   dumpath = create_dumpfile(config, solver_param_name, workdir, "mnist")

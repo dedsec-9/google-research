@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Eval a Keras model on embeddings."""
 
 import time
@@ -70,6 +69,8 @@ flags.DEFINE_float('lr', None, 'not used')
 # Not used.
 flags.DEFINE_float('qat', None, 'not used')
 flags.DEFINE_float('cop', None, 'not used')
+flags.DEFINE_boolean('spec_augment', False, 'Student spec augment.')
+flags.DEFINE_alias('sa', 'spec_augment')
 
 flags.DEFINE_string('logdir', None,
                     'Directory where the model was written to.')

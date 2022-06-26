@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ tf.disable_v2_behavior()
 
 FLAGS = flags.FLAGS
 
-flags.adopt_module_key_flags(common)
 flags.adopt_module_key_flags(train_base)
 
 flags.DEFINE_string('master', '', 'BNS name of the TensorFlow master to use.')

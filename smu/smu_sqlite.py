@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Google Research Authors.
+# Copyright 2022 The Google Research Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Copyright 2022 The Google Research Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Interface to a SQLite DB file for SMU data.
 
 Provides a simpler interface than SQL to create and access the SMU data in an
@@ -21,12 +34,16 @@ SQLite database.
 The majority of the data is stored as a blob, with just the bond topology id and
 smiles string pulled out as fields.
 """
+import datetime
 import os
-
-from absl import logging
 import sqlite3
 
+from absl import logging
+from rdkit import Chem
+
 from smu import dataset_pb2
+from smu.parser import smu_utils_lib
+import snappy
 
 _CONFORMER_TABLE_NAME = 'conformer'
 _BTID_TABLE_NAME = 'btid'
@@ -58,7 +75,7 @@ class SMUSQLite:
     toplogy id, the first one provided will be silently kept.
   """
 
-  def __init__(self, filename, mode):
+  def __init__(self, filename, mode='r'):
     """Creates SMUSQLite.
 
     Args:
@@ -91,10 +108,15 @@ class SMUSQLite:
   def _maybe_init_db(self):
     """Create the table and indices if they do not exist."""
     make_table = (f'CREATE TABLE IF NOT EXISTS {_CONFORMER_TABLE_NAME} '
-                  '(cid INTEGER PRIMARY KEY, conformer BLOB)')
+                  '(cid INTEGER PRIMARY KEY, '
+                  'exp_stoich STRING, '
+                  'conformer BLOB)')
     self._conn.execute(make_table)
     self._conn.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS '
                        f'idx_cid ON {_CONFORMER_TABLE_NAME} (cid)')
+    self._conn.execute(f'CREATE INDEX IF NOT EXISTS '
+                       f'idx_exp_stoich ON {_CONFORMER_TABLE_NAME} '
+                       '(exp_stoich)')
     self._conn.execute(f'CREATE TABLE IF NOT EXISTS {_BTID_TABLE_NAME} '
                        '(btid INTEGER, cid INTEGER)')
     self._conn.execute(f'CREATE INDEX IF NOT EXISTS '
@@ -103,43 +125,88 @@ class SMUSQLite:
                        '(smiles TEXT, btid INTEGER)')
     self._conn.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS '
                        f'idx_smiles ON {_SMILES_TABLE_NAME} (smiles)')
+    self._conn.execute('PRAGMA synchronous = OFF')
+    self._conn.execute('PRAGMA journal_mode = MEMORY')
     self._conn.commit()
 
-  def bulk_insert(self, conformers, batch_size=10000):
+  def bulk_insert(self, encoded_conformers, batch_size=10000, limit=None):
     """Inserts conformers into the database.
 
     Args:
-      conformers: iterable for dataset_pb2.Conformer
+      encoded_conformers: iterable for encoded dataset_pb2.Conformer
       batch_size: insert performance is greatly improved by putting multiple
         insert into one transaction. 10k was a reasonable default from some
         early exploration.
+      limit: maximum number of records to insert
 
     Raises:
       ReadOnlyError: if mode is 'r'
+      ValueError: If encoded_conformers is empty.
     """
     if self._read_only:
       raise ReadOnlyError()
+    if not encoded_conformers:
+      raise ValueError()
 
-    insert_conformer = f'INSERT INTO {_CONFORMER_TABLE_NAME} VALUES (?, ?)'
+    insert_conformer = (f'INSERT INTO {_CONFORMER_TABLE_NAME} '
+                        'VALUES (?, ?, ?)')
     insert_btid = f'INSERT INTO {_BTID_TABLE_NAME} VALUES (?, ?)'
-    insert_smiles = (f'INSERT INTO {_SMILES_TABLE_NAME} VALUES (?, ?) '
-                     f'ON CONFLICT(smiles) DO NOTHING')
+    insert_smiles = (
+        f'INSERT OR IGNORE INTO {_SMILES_TABLE_NAME} VALUES (?, ?) ')
 
     cur = self._conn.cursor()
 
-    for idx, conformer in enumerate(conformers, 1):
-      cur.execute(insert_conformer,
-                  (conformer.conformer_id, conformer.SerializeToString()))
+    start_time = datetime.datetime.now()
+
+    pending_conformer_args = []
+    pending_btid_args = []
+    pending_smiles_args = []
+
+    def commit_pending():
+      cur.executemany(insert_conformer, pending_conformer_args)
+      cur.executemany(insert_btid, pending_btid_args)
+      cur.executemany(insert_smiles, pending_smiles_args)
+      pending_conformer_args.clear()
+      pending_btid_args.clear()
+      pending_smiles_args.clear()
+      self._conn.commit()
+
+    idx = None
+    for idx, encoded_conformer in enumerate(encoded_conformers, 1):
+      conformer = dataset_pb2.Conformer.FromString(encoded_conformer)
+      # A small efficiency hack: the expanded stoich is only intended for use
+      # with topology_detection, so we only put a real value for those so that
+      # we dont' even have to return the entries we don't want.
+      if smu_utils_lib.conformer_eligible_for_topology_detection(conformer):
+        expanded_stoich = (
+            smu_utils_lib.expanded_stoichiometry_from_topology(
+                conformer.bond_topologies[0]))
+      else:
+        expanded_stoich = ''
+      pending_conformer_args.append((conformer.conformer_id, expanded_stoich,
+                                     snappy.compress(encoded_conformer)))
       for bond_topology in conformer.bond_topologies:
-        cur.execute(insert_btid, (bond_topology.bond_topology_id,
-                                  conformer.conformer_id))
-        cur.execute(insert_smiles,
-                    (bond_topology.smiles,
-                     bond_topology.bond_topology_id))
+        pending_btid_args.append(
+            (bond_topology.bond_topology_id, conformer.conformer_id))
+        pending_smiles_args.append(
+            (bond_topology.smiles, bond_topology.bond_topology_id))
       if batch_size and idx % batch_size == 0:
-        logging.info('bulk_insert: committing at index %d', idx)
-        self._conn.commit()
-    self._conn.commit()
+        commit_pending()
+        elapsed = datetime.datetime.now() - start_time
+        logging.info(
+            'bulk_insert: committed at index %d, %f s total, %.6f s/record',
+            idx, elapsed.total_seconds(),
+            elapsed.total_seconds() / idx)
+
+      if limit and idx >= limit:
+        break
+
+    # Commit a final time
+    commit_pending()
+    elapsed = datetime.datetime.now() - start_time
+    logging.info('bulk_insert: Total records %d, %f s, %.6f s/record', idx,
+                 elapsed.total_seconds(),
+                 elapsed.total_seconds() / idx)
 
   def find_by_conformer_id(self, cid):
     """Finds the conformer associated with a conformer id.
@@ -165,7 +232,7 @@ class SMUSQLite:
     # tuple with one value.
     assert len(result) == 1
     assert len(result[0]) == 1
-    return dataset_pb2.Conformer().FromString(result[0][0])
+    return dataset_pb2.Conformer().FromString(snappy.uncompress(result[0][0]))
 
   def find_by_bond_topology_id(self, btid):
     """Finds all the conformer associated with a bond topology id.
@@ -182,7 +249,8 @@ class SMUSQLite:
               f'INNER JOIN {_BTID_TABLE_NAME} USING(cid) '
               f'WHERE {_BTID_TABLE_NAME}.btid = ?')
     cur.execute(select, (btid,))
-    return (dataset_pb2.Conformer().FromString(result[1]) for result in cur)
+    return (dataset_pb2.Conformer().FromString(snappy.uncompress(result[1]))
+            for result in cur)
 
   def find_by_smiles(self, smiles):
     """Finds all conformer associated with a given smiles string.
@@ -193,10 +261,11 @@ class SMUSQLite:
     Returns:
       iterable for dataset_pb2.Conformer
     """
-    # TODO(pfr): add canonicalization here
+    canon_smiles = smu_utils_lib.compute_smiles_for_molecule(
+        Chem.MolFromSmiles(smiles, sanitize=False), include_hs=False)
     cur = self._conn.cursor()
     select = f'SELECT btid FROM {_SMILES_TABLE_NAME} WHERE smiles = ?'
-    cur.execute(select, (smiles,))
+    cur.execute(select, (canon_smiles,))
     result = cur.fetchall()
 
     if not result:
@@ -208,9 +277,56 @@ class SMUSQLite:
     assert len(result[0]) == 1
     return self.find_by_bond_topology_id(result[0][0])
 
+  def find_by_expanded_stoichiometry(self, exp_stoich):
+    """Finds all of the conformers with a stoichiometry.
+
+    The expanded stoichiometry includes hydrogens as part of the atom type.
+    See smu_utils_lib.expanded_stoichiometry_from_topology for a
+    description.
+
+    Args:
+      exp_stoich: string
+
+    Returns:
+      iterable of dataset_pb2.Conformer
+    """
+    cur = self._conn.cursor()
+    select = (f'SELECT conformer '
+              f'FROM {_CONFORMER_TABLE_NAME} '
+              f'WHERE exp_stoich = ?')
+    cur.execute(select, (exp_stoich,))
+    return (dataset_pb2.Conformer().FromString(snappy.uncompress(result[0]))
+            for result in cur)
+
+  def find_by_stoichiometry(self, stoich):
+    """Finds all conformers with a given stoichiometry.
+
+    The stoichiometry is like "C6H12".
+
+    Internally, the stoichiometry is converted a set of expanded stoichiometries
+    and the query is done to find all of those.
+    Notably, this means only records with status <= 512 are returned.
+
+    Args:
+      stoich: stoichiometry string like "C6H12", case doesn't matter
+    Returns:
+      Iterable of type dataset_pb2.Conformer.
+    """
+    exp_stoichs = list(
+        smu_utils_lib.expanded_stoichiometries_from_stoichiometry(stoich))
+    cur = self._conn.cursor()
+    select = (f'SELECT conformer '
+              f'FROM {_CONFORMER_TABLE_NAME} '
+              f'WHERE exp_stoich IN (' + ','.join('?' for _ in exp_stoichs) +
+              ')')
+    cur.execute(select, exp_stoichs)
+    return (dataset_pb2.Conformer().FromString(snappy.uncompress(result[0]))
+            for result in cur)
+
   def __iter__(self):
     """Iterates through all dataset_pb2.Conformer in the DB."""
     select = f'SELECT conformer FROM {_CONFORMER_TABLE_NAME} ORDER BY rowid'
     cur = self._conn.cursor()
     cur.execute(select)
-    return (dataset_pb2.Conformer().FromString(result[0]) for result in cur)
+    return (dataset_pb2.Conformer().FromString(snappy.uncompress(result[0]))
+            for result in cur)
