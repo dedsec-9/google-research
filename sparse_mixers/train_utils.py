@@ -24,7 +24,7 @@ from flax import traverse_util
 from flax.training import train_state as train_state_lib
 import jax
 from jax import random
-import jax.experimental.optimizers
+import jax.example_libraries.optimizers
 import jax.numpy as jnp
 import ml_collections
 import numpy as np
@@ -145,7 +145,7 @@ def collect_metrics(stats):
   stats_np = jax.device_get(stats)
   concat_args = lambda *args: np.concatenate(args) if isinstance(  # pylint: disable=g-long-lambda
       args, list) else np.asarray(args)
-  result = jax.tree_multimap(concat_args, *stats_np)
+  result = jax.tree_map(concat_args, *stats_np)
   return result
 
 
@@ -397,8 +397,8 @@ def _accumulate_gradient(
       mini_grad, mini_metrics = grad_fn(
           params, batch=get_mini_batch(mini_batches, step))
       old_grad, old_metrics = state
-      new_grad = jax.tree_multimap(jnp.add, old_grad, mini_grad)
-      new_metrics = jax.tree_multimap(jnp.add, old_metrics, mini_metrics)
+      new_grad = jax.tree_map(jnp.add, old_grad, mini_grad)
+      new_metrics = jax.tree_map(jnp.add, old_metrics, mini_metrics)
       return new_grad, new_metrics
 
     start_grad, start_metrics = grad_fn(

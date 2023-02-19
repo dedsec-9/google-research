@@ -15,49 +15,62 @@
 
 """Different matrix estimates."""
 
+from typing import Callable, Optional
+
 import jax.numpy as jnp
 import numpy as np
 
 from aux_tasks.synthetic import utils
 
 
-def naive_inverse_covariance_matrix(Phi, key, covariance_batch_size):  # pylint: disable=invalid-name
+def naive_inverse_covariance_matrix(
+    compute_phi,
+    sample_states,
+    key,
+    d,
+    covariance_batch_size):
   """Estimates the covariance matrix naively.
 
   We want to return a covariance matrix whose norm is "equivalent" to a single
   data point, so we multiply by the covariance_batch_size.
 
   Args:
-    Phi: feature matrix.
+    compute_phi: A function that takes states and returns a matrix of phis.
+    sample_states: A function that takes an rng key and a number of states
+      to sample, and returns the sampled states.
     key: jax rng key.
+    d: The number of features in phi.
     covariance_batch_size: how many states to sample to estimate.
 
   Returns:
-    array: naive inverse covariance
+    A tuple containing (the naive inverse covariance matrix, updated rng).
   """
-  num_states, d = Phi.shape
-
-  states, key = utils.draw_states(num_states, covariance_batch_size, key)
-  matrix_estimate = jnp.linalg.solve(Phi[states, :].T @ Phi[states, :],
-                                     jnp.eye(d))
+  states, key = sample_states(key, covariance_batch_size)
+  phi = compute_phi(states)
+  matrix_estimate = jnp.linalg.solve(phi.T @ phi, jnp.eye(d))
 
   return matrix_estimate * covariance_batch_size, key
 
 
-def lissa_inverse_covariance_matrix(  # pylint: disable=invalid-name
-    Phi,
+def lissa_inverse_covariance_matrix(
+    compute_phi,
+    sample_states,
     key,
+    d,
     lissa_iterations,
     lissa_kappa,
-    feature_norm=None):
+    feature_norm = None):
   """Estimates the covariance matrix by LISSA.
 
   By default this method returns a covariance matrix whose norm is equivalent
   to a single data point, no need to multiply.
 
   Args:
-    Phi: feature matrix.
+    compute_phi: A function that takes states and returns a matrix of phis.
+    sample_states: A function that takes an rng key and a number of states
+      to sample, and returns the sampled states.
     key: jax rng key.
+    d: The number of features in phi.
     lissa_iterations: how many states to sample to estimate.
     lissa_kappa: The lissa parameter (gets further divided by feature norm
       squared).
@@ -65,27 +78,36 @@ def lissa_inverse_covariance_matrix(  # pylint: disable=invalid-name
       estimated). If None, computed directly from the feature matrix Phi.
 
   Returns:
-    array: lissa estimate of inverse covariance
+    A tuple containing:
+      (the lissa esimate of the inverse covariance matrix, updated rng).
   """
-  num_states, d = Phi.shape
+  states, key = sample_states(key, lissa_iterations)
+  sampled_phis = compute_phi(states)
 
-  # Determine the largest feaure vector norm, square it.
-  # TODO(bellemare): This uses the whole feature matrix; compare with just
-  # batch.
   if feature_norm is None:
-    feature_norm = utils.compute_max_feature_norm(Phi)
+    feature_norm = utils.compute_max_feature_norm(sampled_phis)
 
   I = np.eye(d)  # pylint: disable=invalid-name
   kappa = lissa_kappa / feature_norm
   estimate = kappa * I
 
-  states, key = utils.draw_states(num_states, lissa_iterations, key)  # pylint: disable=invalid-name
-  sampled_Phis = Phi[states, :]  # pylint: disable=invalid-name
-
   for t in range(lissa_iterations):
-    # Construct a rank-one multiplier.
-    multiplier = I - kappa * sampled_Phis[t, :] @ sampled_Phis[t, :].T
-    # Add one more term to the LISSA sequence.
-    estimate = kappa * I + multiplier @ estimate
+    phi = sampled_phis[t, :]
+
+    # Here we make some optimizations. The equation for updating the lissa
+    # estimate is:
+    #     E_{t} = kI + (I - k * outer(phi, phi)) @ E_{t-1}
+    # However, the matrix multiply is an O(n^3) operation. We can do better.
+    # Rearrange as follows:
+    #    E_{t} = k * (I - phi @ (phi^T @ E_{t-1})) + E_{t-1}
+    # Each term has O(n^2) time complexity.
+    # The trick is to replace the outer product followed by a matrix multiply
+    # (outer(phi, phi) @ E_{t - 1}) with two vector-matrix multiplies
+    # (phi @ (phi^T @ E_{t-1})).
+
+    # Here, einsum is just giving us vector-matrix multiplication
+    # syntactic sugar without needing reshapes. 🍬
+    outer_prod_e = jnp.outer(phi, jnp.einsum('i,ij->j', phi, estimate))
+    estimate = kappa * (I - outer_prod_e) + estimate
 
   return estimate, key

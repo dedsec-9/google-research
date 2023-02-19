@@ -1,5 +1,11 @@
 # ScaNN Release Notes
 
+### 1.2.9
+Updated to compile against TensorFlow 2.11; **not** backwards-compatible with earlier versions of TensorFlow.
+
+### 1.2.8
+Updated to compile against TensorFlow 2.10; **not** backwards-compatible with earlier versions of TensorFlow.
+
 ### 1.2.7
 Updated to compile against TensorFlow 2.9.1; **not** backwards-compatible with earlier versions of TensorFlow. Adds support for Python 3.10.
 

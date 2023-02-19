@@ -29,7 +29,7 @@ import flax.serialization
 from flax.training import checkpoints
 import gin
 import jax
-import jax.experimental.optimizers
+import jax.example_libraries.optimizers
 import jax.numpy as jnp
 import jax.random as jrandom
 
@@ -233,7 +233,7 @@ def standard_train_step(
   if grad_clip is not None:
     # Clip gradients after pmean aggregation
     unclipped_grad = grad
-    grad = jax.experimental.optimizers.clip_grads(grad, grad_clip)
+    grad = jax.example_libraries.optimizers.clip_grads(grad, grad_clip)
 
   new_optimizer = optimizer.apply_gradient(grad, learning_rate=lr)
   metrics['nn/learning_rate'] = lr
@@ -285,7 +285,7 @@ def standard_train_step(
       (1 - ema_decay_rate) * delta**2,
   )
 
-  new_state = jax.tree_multimap(
+  new_state = jax.tree_map(
       lambda a, b: jnp.where(should_replace, a, b),
       new_state,
       state,

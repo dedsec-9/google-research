@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.enable_omnistaging()
 
 # Type alias for functions that handle NDArrays
 NDArray = Union[np.ndarray, jnp.DeviceArray]
@@ -145,7 +144,7 @@ def np_or_jnp(arr):
   """Return either numpy or jax.numpy based on the type of arr."""
   # See also https://numpy.org/neps/nep-0037-array-module.html
   if isinstance(arr,
-                (jnp.DeviceArray, jax.core.UnshapedArray, jax.core.Tracer)):
+                (jax.Array, jax.core.UnshapedArray, jax.core.Tracer)):
     return jnp
   else:
     return np
@@ -272,9 +271,6 @@ force_physical_layout_p = jax.core.Primitive("force_physical_layout")
 force_physical_layout_p.def_impl(_force_physical_layout_impl)
 force_physical_layout_p.def_abstract_eval(
     lambda operand, **_: jax.abstract_arrays.raise_to_shaped(operand))
-jax.interpreters.xla.translations[
-    force_physical_layout_p] = jax.interpreters.xla.lower_fun(
-        _force_physical_layout_impl, multiple_results=False)
 jax.interpreters.mlir.register_lowering(
     force_physical_layout_p, jax.interpreters.mlir.lower_fun(
         _force_physical_layout_impl, multiple_results=False))

@@ -16,8 +16,9 @@
 
 #include "scann/data_format/dataset.h"
 
+#include <cmath>
 #include <cstdint>
-#include <hash_set>
+#include <memory>
 #include <utility>
 
 #include "absl/container/flat_hash_set.h"

@@ -25,6 +25,15 @@
 #mqm-uncategorized-th {
   color: blue;
 }
+.mqm-arrow {
+  opacity: 50%;
+  color: gray;
+  cursor: pointer;
+}
+.mqm-arrow-active {
+  opacity: 100%;
+  color: black;
+}
 .mqm-ci {
   color: gray;
   font-size: x-small
@@ -81,6 +90,17 @@
   font-style: italic;
   cursor: default;
 }
+.mqm-numbers-table td:not(:first-child) {
+  padding-right: 4px;
+  text-align: right;
+}
+.mqm-numbers-table th {
+  min-width: 10ch;
+  max-width: 12ch;
+}
+.mqm-out-of-order {
+  background: lavender;
+}
 #mqm-reset-settings {
   cursor: pointer;
 }
@@ -89,7 +109,7 @@
 }
 #mqm-score-heading {
   font-weight: bold;
-  max-width: 15ch;
+  max-width: 10ch;
 }
 .mqm-score-th {
   min-width: 10ch;
@@ -103,15 +123,36 @@
   max-width: 100px;
   min-width: 50px;
 }
-.mqm-settings-table {
-  margin: 6px 0 4px 20px;
-}
 .mqm-settings {
   margin: 6px 0 4px;
+  padding: 0 0 10px 0;
 }
 .mqm-settings summary {
   cursor: pointer;
   color: blue;
+}
+.mqm-settings-editable {
+  border-bottom: 1px solid blue;
+  display: inline-block;
+  min-width: 10ch;
+}
+.mqm-settings-panel {
+  margin: 6px 0 4px 20px;
+}
+.mqm-settings-row {
+  margin: 6px 0;
+}
+.mqm-stats-slice {
+  background-color: #F0F0F0;
+}
+.mqm-stats-weighted {
+  background-color: #F8F8F8;
+}
+.mqm-sys-v-sys {
+  margin: 8px;
+}
+.mqm-sys-v-sys-hist {
+  cursor: pointer;
 }
 .mqm-table {
   border: none;
@@ -124,7 +165,7 @@
 .mqm-table th {
   border-left: 1px solid gray;
   padding: 4px;
-  vertical-align: top;
+  vertical-align: text-top;
   word-wrap: break-word;
 }
 .mqm-table th {
@@ -182,4 +223,8 @@
 }
 .mqm-val:hover {
   cursor: pointer;
+}
+#mqm-viewing-constraints {
+  cursor: pointer;
+  font-style: italic;
 }

@@ -167,7 +167,7 @@ def make_model_apply(model, rng_key):
 
 def stack_forest(forest):
   stack_args = lambda *args: np.stack(args)
-  return jax.tree_multimap(stack_args, *forest)
+  return jax.tree_map(stack_args, *forest)
 
 
 def get_metrics(device_metrics):
@@ -561,7 +561,7 @@ def summarize_tree(pytree, short=True):
           elif np.issubdtype(x.dtype, np.integer):
             info += (f" [{np.min(flat)}, {np.max(flat)}] "
                      f"nz:{np.count_nonzero(flat) / len(flat):.2}")
-          elif np.issubdtype(x.dtype, np.bool):
+          elif np.issubdtype(x.dtype, bool):
             info += f" T:{np.count_nonzero(flat) / len(flat):.2}"
         else:
           info = {
@@ -586,7 +586,7 @@ def summarize_tree(pytree, short=True):
 
 
 def apply_ema(decay, avg, new):
-  return jax.tree_multimap(lambda a, b: decay * a + (1. - decay) * b, avg, new)
+  return jax.tree_map(lambda a, b: decay * a + (1. - decay) * b, avg, new)
 
 
 def expand_by_shape(arr, shape):

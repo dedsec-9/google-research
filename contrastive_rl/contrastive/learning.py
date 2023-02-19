@@ -252,8 +252,18 @@ class ContrastiveLearner(acme.Learner):
             q_params, new_obs, action)
         if len(q_action.shape) == 3:  # twin q trick
           assert q_action.shape[2] == 2
-          q_action = jnp.mean(q_action, axis=-1)
+          q_action = jnp.min(q_action, axis=-1)
         actor_loss = alpha * log_prob - jnp.diag(q_action)
+
+        assert 0.0 <= config.bc_coef <= 1.0
+        if config.bc_coef > 0:
+          orig_action = transitions.action
+          if config.random_goals == 0.5:
+            orig_action = jnp.concatenate([orig_action, orig_action], axis=0)
+
+          bc_loss = -1.0 * networks.log_prob(dist_params, orig_action)
+          actor_loss = (config.bc_coef * bc_loss
+                        + (1 - config.bc_coef) * actor_loss)
 
       return jnp.mean(actor_loss)
 
@@ -301,7 +311,7 @@ class ContrastiveLearner(acme.Learner):
 
         q_params = optax.apply_updates(state.q_params, critic_update)
 
-        new_target_q_params = jax.tree_multimap(
+        new_target_q_params = jax.tree_map(
             lambda x, y: x * (1 - config.tau) + y * config.tau,
             state.target_q_params, q_params)
         metrics = critic_metrics

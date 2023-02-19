@@ -369,6 +369,13 @@ class PruningOp(object):
   _pruning_hparams = None
 
   @classmethod
+  def Reset(cls):
+    cls._pruning_hparams_dict = {}
+    cls._global_step = None
+    cls._pruning_obj = None
+    cls._pruning_hparams = None
+
+  @classmethod
   def Setup(cls, pruning_hparams_dict, global_step):  # pylint:disable=invalid-name
     """Set up the pruning op with pruning hyperparameters and global step.
 
@@ -404,6 +411,13 @@ class PruningOp(object):
                                                layerobj, weight_name,
                                                wm_pc.shape, dtype, scope,
                                                compression_op_spec)
+
+  @classmethod
+  def GetLastAlphaUpdateStep(cls):
+    if not cls._pruning_obj:
+      raise NotImplementedError()
+    else:
+      return getattr(cls._pruning_obj, 'last_alpha_update_step', None)
 
   @classmethod
   def GetMixResult(cls, theta, concat, lstmobj):  # pylint:disable=invalid-name

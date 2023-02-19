@@ -142,14 +142,17 @@ class AquademBuilder(builders.ActorLearnerBuilder):
     return self._rl_agent.make_replay_tables(discretized_spec,
                                              policy.discrete_policy)
 
-  def make_dataset_iterator(
+  def make_dataset_iterator(  # pytype: disable=signature-mismatch  # overriding-return-type-checks
       self,
       replay_client):
     return self._rl_agent.make_dataset_iterator(replay_client)
 
-  def make_adder(self,
-                 replay_client):
-    return self._rl_agent.make_adder(replay_client)
+  def make_adder(
+      self, replay_client,
+      environment_spec,
+      policy
+  ):
+    return self._rl_agent.make_adder(replay_client, environment_spec, policy)
 
   def make_actor(
       self,
